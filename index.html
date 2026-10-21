@@ -402,8 +402,8 @@ function adjustLine(l, got) {
 }
 function shortageText(client, items) {
   const [d, m] = day().split('-').reverse();
-  return [`Olá, ${client}! Do seu pedido de ${d}/${m}, o fornecedor não tinha todas as peças:`, '',
-    ...items.map(x => `- ${x.l.product}: pedido ${x.l.qty}, vai ${x.got} (faltam ${x.l.qty - x.got})`)].join('\n');
+  return [`Olá, ${client}!`, '', `*Peças faltantes do seu pedido de ${d}/${m}:*`, '',
+    ...items.map(x => `- ${x.l.product}: pedido ${x.l.qty}, será enviado ${x.got} (faltam ${x.l.qty - x.got})`)].join('\n');
 }
 function renderShort(ls) {
   const m = allocateAll(ls), byC = {};
