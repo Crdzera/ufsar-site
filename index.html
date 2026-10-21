@@ -67,11 +67,11 @@
     <div class="card">
       <h2>Novo pedido</h2>
       <div class="row">
-        <div><label>Cliente</label><input id="client" list="clients" placeholder="Nome do cliente" autocomplete="off"></div>
+        <div><label>Cliente (deixe vazio se colar a conversa do WhatsApp com o nome)</label><input id="client" list="clients" placeholder="Nome do cliente" autocomplete="off"></div>
         <div><label>Fornecedor (opcional)</label><input id="supplier" list="suppliers" placeholder="Para quem você compra" autocomplete="off"></div>
       </div>
-      <div style="margin:10px 0 4px"><label>Itens — um por linha (ex.: <b>3x Ignite V50 Menta</b> ou <b>2 Elfbar BC5000 Uva</b>)</label>
-        <textarea id="items" placeholder="3x Ignite V50 Menta&#10;2x Elfbar BC5000 Uva&#10;1x Nossa Marca Morango"></textarea></div>
+      <div style="margin:10px 0 4px"><label>Cole aqui a mensagem do WhatsApp (ou digite um item por linha: <b>3x Ignite V50 Menta</b>)</label>
+        <textarea id="items" placeholder="[10:32, 21/10/2026] João: 3x Ignite V50 Menta&#10;2x Elfbar BC5000 Uva"></textarea></div>
       <div class="row" style="align-items:center">
         <label style="display:flex;gap:6px;align-items:center;margin:0;flex:1 1 220px">
           <input type="checkbox" id="own" style="width:auto"> Marca própria (sai do estoque, não entra na compra)
@@ -95,7 +95,7 @@
       <div class="row" style="align-items:center">
         <div><div class="mut">A comprar neste dia</div><div class="big" id="buyTotal">0</div></div>
         <div style="flex:0 0 auto" class="row">
-          <button id="copy">📋 Copiar lista</button>
+          <button id="copy">📋 Copiar tudo</button>
           <button id="csv">⬇ CSV</button>
           <button id="done" class="ok">✔ Marcar como comprado</button>
         </div>
@@ -156,19 +156,35 @@ function parseLine(s) {
   return { qty: 1, product: s };
 }
 
+// Aceita texto copiado do WhatsApp: "[10:32, 21/10/2026] João: 3x Ignite" ou "21/10/2026 10:32 - João: ..."
+// Linhas sem remetente pertencem ao último remetente (ou ao campo Cliente). Vários clientes numa colagem funcionam.
+const WA = /^\u200e?\[?(?:\d{1,2}\/\d{1,2}\/\d{2,4}|\d{1,2}:\d{2}(?::\d{2})?)[,\s]*(?:\d{1,2}\/\d{1,2}\/\d{2,4}|\d{1,2}:\d{2}(?::\d{2})?)?(?:\s*[APap]\.?[Mm]\.?)?\]?\s*[-–]?\s*([^:\n]+?):\s*(.*)$/;
+const CHAT = /^(oi+|ol[aá]|e a[ií]|bom dia|boa tarde|boa noite|obrigad[oa]|valeu|ok(ay)?|blz|beleza|certo|tudo bem|pode ser|fechado|sim|n[aã]o|pix|<m[ií]dia.*|mensagem apagada.*)[\s!.,?]*$/i;
+function parseChat(text, defaultClient) {
+  let client = defaultClient, out = [];
+  for (let raw of text.split('\n')) {
+    let line = raw, m = line.match(WA);
+    if (m) { client = norm(m[1]); line = m[2]; }
+    line = line.replace(/^[\s\-•*·]+/, '');
+    const it = parseLine(line);
+    if (it && /[a-zA-ZÀ-ÿ]/.test(it.product) && !CHAT.test(it.product)) out.push({ client, ...it });
+  }
+  return out;
+}
+
 function addOrder() {
-  const client = norm($('client').value);
-  if (!client) return msg('Informe o cliente.');
-  const parsed = $('items').value.split('\n').map(parseLine).filter(Boolean);
-  if (!parsed.length) return msg('Informe pelo menos um item.');
+  const parsed = parseChat($('items').value, norm($('client').value));
+  if (!parsed.length) return msg('Cole os itens do pedido.');
+  if (parsed.some(p => !p.client)) return msg('Informe o cliente (ou cole a conversa com o nome dele).');
   parsed.forEach(p => lines.push({
-    id: uid(), date: day(), client, supplier: norm($('supplier').value),
+    id: uid(), date: day(), client: p.client, supplier: norm($('supplier').value),
     product: p.product, qty: p.qty, own: $('own').checked, bought: false,
   }));
   save();
+  const nomes = [...new Set(parsed.map(p => p.client))].join(', ');
   $('items').value = ''; $('client').value = ''; $('own').checked = false;
-  msg(`✔ ${parsed.length} item(ns) de ${client} adicionados.`);
-  $('client').focus();
+  msg(`✔ ${parsed.length} item(ns) adicionados: ${nomes}.`);
+  $('items').focus();
   render();
 }
 function msg(t) { $('addmsg').textContent = t; }
@@ -228,7 +244,9 @@ function renderBuy(ls) {
   else box.replaceChildren(...sups.map(s => {
     const rows = Object.values(groups[s]).sort((a, b) => a.product.localeCompare(b.product));
     return el('div', { className: 'card' },
-      el('h2', { textContent: `${s} — ${rows.reduce((a, p) => a + p.qty, 0)} un.` }),
+      el('div', { className: 'row', style: 'align-items:center;margin-bottom:8px' },
+        el('h2', { style: 'margin:0', textContent: `${s} — ${rows.reduce((a, p) => a + p.qty, 0)} un.` }),
+        el('button', { className: 'pri', style: 'flex:0 0 auto', textContent: '📋 Copiar para WhatsApp', onclick: e => copyText(supplierText(s, rows), e.target, '📋 Copiar para WhatsApp') })),
       el('table', {},
         el('tr', {}, el('th', { className: 'n', textContent: 'Qtd' }), el('th', { textContent: 'Produto' }), el('th', { textContent: 'Clientes' })),
         ...rows.map(p => el('tr', {},
@@ -242,23 +260,21 @@ function renderBuy(ls) {
     el('td', { className: 'n', textContent: l.qty + 'x' }), el('td', { textContent: l.product }), el('td', { className: 'mut', textContent: l.client })))));
 }
 
+function supplierText(sup, rows) {
+  const [d, m] = day().split('-').reverse();
+  return [`Pedido ${d}/${m}${sup.startsWith('Sem ') ? '' : ' - ' + sup}`, '', ...rows.map(p => `${p.qty}x ${p.product}`)].join('\n');
+}
+function sortedRows(g) { return Object.values(g).sort((a, b) => a.product.localeCompare(b.product)); }
 function buyText() {
   const groups = consolidate(dayLines());
-  const [d, m, y] = day().split('-').reverse();
-  const out = [`Pedido ${d}/${m}/${y}`];
-  Object.keys(groups).sort().forEach(s => {
-    out.push('', `*${s}*`);
-    Object.values(groups[s]).sort((a, b) => a.product.localeCompare(b.product))
-      .forEach(p => out.push(`${p.qty}x ${p.product}`));
-  });
-  return out.join('\n');
+  return Object.keys(groups).sort().map(s => supplierText(s, sortedRows(groups[s]))).join('\n\n');
 }
-async function copyList() {
-  const t = buyText();
-  try { await navigator.clipboard.writeText(t); $('copy').textContent = '✔ Copiado!'; }
+async function copyText(t, btn, label) {
+  try { await navigator.clipboard.writeText(t); btn.textContent = '✔ Copiado!'; }
   catch { prompt('Copie o texto abaixo:', t); }
-  setTimeout(() => $('copy').textContent = '📋 Copiar lista', 1500);
+  setTimeout(() => btn.textContent = label, 1500);
 }
+const copyList = () => copyText(buyText(), $('copy'), '📋 Copiar tudo');
 function download(name, content, type) {
   const a = el('a', { href: URL.createObjectURL(new Blob([content], { type })), download: name });
   a.click(); URL.revokeObjectURL(a.href);
