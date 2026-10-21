@@ -74,7 +74,7 @@
         <textarea id="items" placeholder="[10:32, 21/10/2026] João: 3x Ignite V50 Menta&#10;2x Elfbar BC5000 Uva"></textarea></div>
       <div class="row" style="align-items:center">
         <label style="display:flex;gap:6px;align-items:center;margin:0;flex:1 1 220px">
-          <input type="checkbox" id="own" style="width:auto"> Marca própria (sai do estoque, não entra na compra)
+          <input type="checkbox" id="own" style="width:auto"> Forçar marca própria (os modelos Black Sheep já são reconhecidos sozinhos)
         </label>
         <button class="pri" id="add" style="flex:0 0 auto">Adicionar pedido</button>
       </div>
@@ -110,11 +110,13 @@
 
   <div class="card">
     <details id="supBox">
-      <summary>Fornecedores e modelos</summary>
+      <summary>Fornecedores e marca própria</summary>
       <p class="mut">Um fornecedor por bloco (separe os blocos com uma linha em branco). A 1ª linha é o nome do fornecedor; as demais são os modelos dele. Vale o nome parcial: <b>elfbar</b> pega todos os modelos Elfbar. O modelo mais específico ganha.</p>
       <textarea id="supText" style="min-height:260px"></textarea>
+      <div class="mut" style="margin:14px 0 4px"><b>Marca própria — Black Sheep</b> (um modelo por linha; esses saem do estoque e não entram na compra)</div>
+      <textarea id="ownText" style="min-height:130px"></textarea>
       <div class="row" style="margin-top:8px;align-items:center">
-        <button class="pri" id="supSave" style="flex:0 0 auto">Salvar fornecedores</button>
+        <button class="pri" id="supSave" style="flex:0 0 auto">Salvar</button>
         <span class="mut" id="supMsg"></span>
       </div>
     </details>
@@ -195,6 +197,21 @@ function supplierFor(name) {
   let best = null;
   rules.forEach(r => { if (r.tk.length && r.tk.every(t => set.has(t)) && (!best || r.tk.length > best.tk.length)) best = r; });
   return best ? best.sup : '';
+}
+// ---- Marca própria: modelos que saem do estoque e não entram na compra
+const OWN_KEY = 'propria-v1';
+const OWN_DEFAULT = `POD TBS 40K
+POD TBS 55K
+POD TBS DUO MIX 30K KIT
+POD TBS CARTRIDGE DUO MIX 15K
+POD TBS SLATE 15K`;
+function loadOwn() { try { return localStorage.getItem(OWN_KEY) || OWN_DEFAULT; } catch { return OWN_DEFAULT; } }
+const buildOwn = text => text.split('\n').map(tokens).filter(t => t.length);
+let ownRules = buildOwn(loadOwn());
+function isOwn(l) {
+  if (l.own) return true;
+  const set = new Set(tokens(l.model || l.product));
+  return ownRules.some(r => r.every(t => set.has(t)));
 }
 const supplierOf = l => l.supplier || supplierFor(l.model || l.product);
 
@@ -285,9 +302,9 @@ function renderOrders(ls) {
     const t = el('table', {}, ...items.map(l => el('tr', {},
       el('td', { className: 'n', textContent: l.qty + 'x' }),
       el('td', {}, l.product + ' ',
-        l.own ? el('span', { className: 'tag', textContent: 'própria' }) : '',
-        l.own ? '' : (supplierOf(l) ? el('span', { className: 'tag', textContent: supplierOf(l) }) : el('span', { className: 'tag warn', textContent: 'sem fornecedor' })),
-        l.bought ? el('span', { className: 'tag ok', textContent: 'comprado' }) : (l.own ? '' : el('span', { className: 'tag warn', textContent: 'a comprar' }))),
+        isOwn(l) ? el('span', { className: 'tag', textContent: 'própria' }) : '',
+        isOwn(l) ? '' : (supplierOf(l) ? el('span', { className: 'tag', textContent: supplierOf(l) }) : el('span', { className: 'tag warn', textContent: 'sem fornecedor' })),
+        l.bought ? el('span', { className: 'tag ok', textContent: 'comprado' }) : (isOwn(l) ? '' : el('span', { className: 'tag warn', textContent: 'a comprar' }))),
       el('td', { className: 'n mut', textContent: l.price != null ? brl(l.price * l.qty) : '' }),
       el('td', { className: 'n' },
         el('button', { className: 'x', textContent: '✎', title: 'Editar quantidade', onclick: () => editQty(l) }),
@@ -304,7 +321,7 @@ function editQty(l) {
 // ---- Consolidação: soma por produto (ignorando maiúsculas/espaços), agrupada por fornecedor
 function consolidate(ls) {
   const groups = {};
-  ls.filter(l => !l.own && !l.bought).forEach(l => {
+  ls.filter(l => !isOwn(l) && !l.bought).forEach(l => {
     const sup = supplierOf(l) || 'Sem fornecedor definido';
     const g = (groups[sup] ||= {});
     const p = (g[key(l.product)] ||= { product: l.product, model: l.model || '', flavor: l.flavor || '', qty: 0, price: null, who: {} });
@@ -345,7 +362,7 @@ function renderBuy(ls) {
         el('button', { className: 'pri', style: 'flex:0 0 auto', textContent: '📋 Copiar para WhatsApp', onclick: e => copyText(supplierText(s, rows), e.target, '📋 Copiar para WhatsApp') })),
       el('table', {}, el('tr', {}, el('th', { className: 'n', textContent: 'Qtd' }), el('th', { textContent: 'Sabor' }), el('th', { className: 'n', textContent: 'Subtotal' }), el('th', { textContent: 'Clientes' })), ...trs));
   }));
-  const own = ls.filter(l => l.own);
+  const own = ls.filter(l => isOwn(l));
   $('ownCard').style.display = own.length ? '' : 'none';
   $('ownList').replaceChildren(el('table', {}, ...own.map(l => el('tr', {},
     el('td', { className: 'n', textContent: l.qty + 'x' }), el('td', { textContent: l.product }), el('td', { className: 'mut', textContent: l.client })))));
@@ -387,7 +404,7 @@ function exportCsv() {
   download(`compra-${day()}.csv`, '\ufeff' + rows.map(r => r.map(csvCell).join(';')).join('\n'), 'text/csv');
 }
 function markDone() {
-  const pend = dayLines().filter(l => !l.own && !l.bought);
+  const pend = dayLines().filter(l => !isOwn(l) && !l.bought);
   if (!pend.length) return;
   if (!confirm(`Marcar ${pend.length} itens de ${day().split('-').reverse().join('/')} como comprados?`)) return;
   pend.forEach(l => l.bought = true); save(); render();
@@ -405,10 +422,11 @@ function shift(n) { const d = new Date(day() + 'T12:00'); d.setDate(d.getDate() 
 $('tab-orders').onclick = () => tab('orders');
 $('tab-buy').onclick = () => tab('buy');
 $('supText').value = loadSup();
+$('ownText').value = loadOwn();
 $('supSave').onclick = () => {
-  try { localStorage.setItem(SUP_KEY, $('supText').value); } catch {}
-  rules = buildRules($('supText').value); render();
-  $('supMsg').textContent = `✔ Salvo (${rules.length} modelos).`;
+  try { localStorage.setItem(SUP_KEY, $('supText').value); localStorage.setItem(OWN_KEY, $('ownText').value); } catch {}
+  rules = buildRules($('supText').value); ownRules = buildOwn($('ownText').value); render();
+  $('supMsg').textContent = `✔ Salvo (${rules.length} modelos de fornecedor, ${ownRules.length} da marca própria).`;
 };
 $('add').onclick = addOrder;
 $('copy').onclick = copyList;
