@@ -194,6 +194,26 @@ function el(tag, props = {}, ...kids) {
   return e;
 }
 
+// Janelas do próprio sistema: o confirm()/prompt() do navegador é bloqueado em páginas incorporadas e o botão "não faz nada"
+function dialog(msg, o = {}) {
+  return new Promise(res => {
+    const inp = o.input !== undefined ? el('input', { value: o.input, style: 'margin-top:10px' }) : null;
+    const area = o.area ? el('textarea', { value: o.area, readOnly: true, style: 'margin-top:10px;min-height:180px' }) : null;
+    const ok = el('button', { className: 'pri', style: 'flex:0 0 auto', textContent: o.ok || 'OK' });
+    const no = el('button', { style: 'flex:0 0 auto', textContent: 'Cancelar' });
+    const wrap = el('div', { style: 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:99' },
+      el('div', { style: 'background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:18px;max-width:440px;width:calc(100% - 32px);white-space:pre-wrap' },
+        msg, inp || '', area || '', el('div', { className: 'row', style: 'margin-top:14px;justify-content:flex-end' }, o.single ? '' : no, ok)));
+    const done = v => { wrap.remove(); res(v); };
+    ok.onclick = () => done(inp ? inp.value : true);
+    no.onclick = () => done(inp ? null : false);
+    wrap.onkeydown = e => { if (e.key === 'Escape') no.click(); if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') ok.click(); };
+    document.body.append(wrap); (inp || area || ok).focus(); if (area) area.select();
+  });
+}
+const askConfirm = (msg, ok) => dialog(msg, { ok });
+const askText = (msg, def) => dialog(msg, { input: String(def ?? ''), ok: 'Salvar' });
+
 $('date').value = iso(new Date());
 const day = () => $('date').value;
 const dayLines = () => lines.filter(l => l.date === day());
@@ -356,8 +376,8 @@ function renderOrders(ls) {
     return el('div', {}, el('div', { className: 'sup', textContent: c }), t);
   }));
 }
-function editQty(l) {
-  const v = parseInt(prompt(`Nova quantidade para "${l.product}":`, l.qty), 10);
+async function editQty(l) {
+  const v = parseInt(await askText(`Nova quantidade para "${l.product}":`, l.qty), 10);
   if (v > 0) { l.qty = v; save(); render(); }
 }
 
@@ -396,8 +416,8 @@ function setAvail(sup, p, raw) {
   try { localStorage.setItem(AV_KEY, JSON.stringify(avail)); } catch {}
   save(); render();
 }
-function adjustLine(l, got) {
-  const v = parseInt(prompt(`${l.client}: pediu ${l.qty}. Quantos ele vai receber?`, got), 10);
+async function adjustLine(l, got) {
+  const v = parseInt(await askText(`${l.client}: pediu ${l.qty}. Quantos ele vai receber?`, got), 10);
   if (v >= 0) { l.manualGot = Math.min(v, l.qty); save(); render(); }
 }
 function shortageText(client, items) {
@@ -489,9 +509,16 @@ function buyText() {
   return Object.keys(groups).sort().map(s => supplierText(s, sortedRows(groups[s]))).join('\n\n');
 }
 async function copyText(t, btn, label) {
-  try { await navigator.clipboard.writeText(t); btn.textContent = '✔ Copiado!'; }
-  catch { prompt('Copie o texto abaixo:', t); }
-  setTimeout(() => btn.textContent = label, 1500);
+  let ok = false;
+  try { await navigator.clipboard.writeText(t); ok = true; } catch {}
+  if (!ok) {                                    // plano B: cópia por seleção; se também falhar, mostra o texto para copiar à mão
+    const ta = el('textarea', { value: t, style: 'position:fixed;opacity:0' });
+    document.body.append(ta); ta.select();
+    try { ok = document.execCommand('copy'); } catch {}
+    ta.remove();
+  }
+  if (ok) { btn.textContent = '✔ Copiado!'; setTimeout(() => btn.textContent = label, 1500); }
+  else await dialog('Não consegui copiar sozinho. Selecione o texto abaixo e copie (Ctrl+C):', { area: t, single: true });
 }
 const copyList = () => copyText(buyText(), $('copy'), '📋 Copiar tudo');
 function download(name, content, type) {
@@ -506,10 +533,10 @@ function exportCsv() {
     rows.push([s, p.model, p.model ? p.flavor : p.product, String(p.qty), Object.entries(p.who).map(([c, q]) => `${c} (${q})`).join(', ')]))));
   download(`compra-${day()}.csv`, '\ufeff' + rows.map(r => r.map(csvCell).join(';')).join('\n'), 'text/csv');
 }
-function markDone() {
+async function markDone() {
   const pend = dayLines().filter(l => !isOwn(l) && !l.bought);
   if (!pend.length) return;
-  if (!confirm(`Marcar ${pend.length} itens de ${day().split('-').reverse().join('/')} como comprados?`)) return;
+  if (!await askConfirm(`Marcar ${pend.length} itens de ${day().split('-').reverse().join('/')} como comprados?`, 'Marcar como comprado')) return;
   const gm = allocateAll(dayLines());
   pend.forEach(l => { l.got = gotOf(l, gm); l.bought = true; });
   save(); render();
@@ -647,8 +674,8 @@ function renderList() {
     if (b !== brand) { brand = b; if (b) out.push(el('div', { style: 'font-weight:700;margin-top:18px;padding-bottom:4px;border-bottom:2px solid var(--line)', textContent: b })); }
     out.push(el('div', {}, el('div', { className: 'sup' }, label || 'Sem modelo',
       el('span', { className: 'mut', textContent: (uni ? ` — ${uni}` : '') + (items[0].note ? ` ${items[0].note}` : '') }),
-      model ? el('button', { className: 'x', textContent: '✎ preço', onclick: () => {
-        const v = prompt(`Preço de ${label} (para todos os sabores; escreva "consultar" se não tiver):`, items[0].price ?? '');
+      model ? el('button', { className: 'x', textContent: '✎ preço', onclick: async () => {
+        const v = await askText(`Preço de ${label} (para todos os sabores; escreva "consultar" se não tiver):`, items[0].price ?? '');
         if (v == null) return;
         const c = CONSULT.test(v), pr = c ? null : money(v);
         if (c || pr != null) { items.forEach(x => { x.price = pr; x.consult = c; }); saveListas(); render(); } } }) : ''),
@@ -656,29 +683,29 @@ function renderList() {
         el('td', { textContent: x.flavor }),
         el('td', { className: 'n mut', textContent: x.qty != null ? (x.last ? 'últimas ' : '') + x.qty + ' un.' : '' }),
         el('td', { className: 'n' },
-          el('button', { className: 'x', textContent: '✎', title: 'Quantidade disponível', onclick: () => {
-            const v = prompt(`Quantidade de "${x.flavor}" (vazio = sem limite):`, x.qty ?? '');
+          el('button', { className: 'x', textContent: '✎', title: 'Quantidade disponível', onclick: async () => {
+            const v = await askText(`Quantidade de "${x.flavor}" (vazio = sem limite):`, x.qty ?? '');
             if (v != null) { x.qty = v.trim() === '' ? null : Math.max(0, parseInt(v, 10) || 0); saveListas(); render(); } } }),
           el('button', { className: 'x', textContent: '✕', title: 'Tirar da lista (esgotou)', onclick: () => { curList().splice(curList().indexOf(x), 1); saveListas(); render(); } })))))));
     return out;
   }) : [el('div', { className: 'empty', textContent: 'Lista vazia. Cole a lista do dia acima.' })]));
 }
 function listMsg(t) { $('listMsg').textContent = t; }
-function submitList(mode) {
+async function submitList(mode) {
   const ops = parseList($('listText').value);
   const tl = $('listText').value.split('\n').map(fmt).find(l => /lista\s+atualizada/i.test(l));
   if (tl) { $('listHead').value = tl.trim(); try { localStorage.setItem(HEAD_KEY, tl.trim()); } catch {} }
   if (!ops.some(o => !o.header)) return listMsg('Não encontrei sabores no texto colado.');
-  if (mode === 'all' && curList().length && !confirm('Substituir a lista inteira de hoje?')) return;
+  if (mode === 'all' && curList().length && !await askConfirm('Substituir a lista inteira de hoje?', 'Substituir')) return;
   const r = applyList(ops, mode);
   $('listText').value = '';
   listMsg(`✔ Lista atualizada: ${curList().length} sabores (+${r.added} novos, −${r.removed} saíram).`);
   render();
 }
-function copyYesterday() {
+async function copyYesterday() {
   const prev = Object.keys(listas).filter(d => d < day() && listas[d].length).sort().pop();
   if (!prev) return listMsg('Não há lista de dias anteriores.');
-  if (curList().length && !confirm('Já existe lista hoje. Substituir pela de ' + prev.split('-').reverse().join('/') + '?')) return;
+  if (curList().length && !await askConfirm('Já existe lista hoje. Substituir pela de ' + prev.split('-').reverse().join('/') + '?', 'Substituir')) return;
   listas[day()] = JSON.parse(JSON.stringify(listas[prev])); saveListas();
   listMsg(`✔ Copiada a lista de ${prev.split('-').reverse().join('/')}. Cole só as mudanças de hoje.`); render();
 }
@@ -701,10 +728,10 @@ $('listMerge').onclick = () => submitList('models');
 $('listAdd').onclick = () => submitList('add');
 $('listReplace').onclick = () => submitList('all');
 $('listYest').onclick = copyYesterday;
-$('listClear').onclick = () => {
+$('listClear').onclick = async () => {
   const n = curList().length;
   if (!n) return listMsg('A lista de hoje já está vazia.');
-  if (!confirm(`Apagar a lista inteira de ${day().split('-').reverse().join('/')} (${n} sabores)? Isso não pode ser desfeito.`)) return;
+  if (!await askConfirm(`Apagar a lista inteira de ${day().split('-').reverse().join('/')} (${n} sabores)? Isso não pode ser desfeito.`, 'Apagar tudo')) return;
   listas[day()] = []; saveListas(); listMsg('✔ Lista apagada.'); render();
 };
 $('listCopy').onclick = e => copyText(listText(), e.target, '📋 Copiar lista completa');
@@ -732,8 +759,8 @@ $('file').onchange = async e => {
     const data = JSON.parse(await e.target.files[0].text());
     const ls = Array.isArray(data) ? data : data.lines;
     if (!Array.isArray(ls)) throw 0;
-    if (confirm('Isso substitui todos os dados atuais. Continuar?')) { lines = ls; if (data.listas) { listas = data.listas; saveListas(); } save(); render(); }
-  } catch { alert('Arquivo de backup inválido.'); }
+    if (await askConfirm('Isso substitui todos os dados atuais. Continuar?', 'Restaurar')) { lines = ls; if (data.listas) { listas = data.listas; saveListas(); } save(); render(); }
+  } catch { await dialog('Arquivo de backup inválido.', { single: true }); }
   e.target.value = '';
 };
 render();
