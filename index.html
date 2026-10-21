@@ -134,6 +134,7 @@
         <button id="listYest">Copiar lista de ontem</button>
       </div>
       <div class="mut" id="listMsg" style="margin-top:6px"></div>
+      <div style="margin-top:8px"><label>Título da lista (primeira linha do texto que você copia)</label><input id="listHead"></div>
       <div class="mut" style="margin-top:6px"><b>Atualizar lista:</b> cada modelo que você colar vira a versão nova dele (sabor que sumiu sai da lista); modelos que você não colar ficam como estão. Sabor sem nada ao lado = disponível. Se um modelo tiver “esgotado”, o sistema só tira aquele sabor e não mexe nos outros. <b>Só acrescentar:</b> nunca apaga nada por omissão. <b>Substituir tudo:</b> apaga a lista do dia e usa só o que você colou.</div>
     </div>
     <div class="card">
@@ -524,8 +525,10 @@ const PRICE = /\$\s*\d[\d.,]*/;
 const CONSULT = /\bconsultar\b/i;
 const TITLE = /lista\s+(atualizada|do dia)/i;
 const LAST = /[-–—]\s*[úu]ltimas?\s+(\d+)\s*(?:un|und|pcs|pç)?\.?\s*$/i;
+const fmt = t => t.replace(/[*_~]/g, '');                                   // tira *negrito* _itálico_ ~riscado~ do WhatsApp
+const BULLETRE = /^\s*[-–—•·▪►>*]\s+(\S.*)$/;                              // marcador de lista = símbolo + espaço ("* Grape"); "*Modelo*" não é marcador
 const isDeco = t => t.trim().length >= 3 && !/[A-Za-z0-9À-ÿ]/.test(t);   // linha só de ━━━━ ou ----
-const plabel = x => x.price != null ? brl(x.price) : (x.consult ? 'consultar' : '');
+const plabel = x => x.price != null ? '$ ' + x.price.toFixed(2).replace('.', ',') : (x.consult ? 'consultar' : '');
 const qlabel = x => x.qty == null ? '' : x.last ? ` — últimas ${x.qty} un` : ` (${x.qty} un.)`;
 
 function flavorOps(text, ctx) {          // "Grape Ice — últimas 100 un" | "Grape (20 un.)" | "Grape x20" | "Grape esgotado"
@@ -536,18 +539,18 @@ function flavorOps(text, ctx) {          // "Grape Ice — últimas 100 un" | "G
   else if ((m = t.match(/[\(\[]\s*(\d+)\s*(?:un|und|pcs|pç|pecas|peças)?\.?\s*[\)\]]\s*$/i)) || (m = t.match(/[-–—:]\s*(\d+)\s*(?:un|und|pcs|pç|pecas|peças)\.?\s*$/i))
         || (m = t.match(/\bx\s*(\d+)\s*$/i)) || (m = t.match(/\s(0)\s*$/))) { qty = +m[1]; t = t.slice(0, m.index); }
   const flavor = norm(t.replace(/[\s\-–—:,]+$/, ''));
-  return flavor ? { brand: ctx.brand, model: ctx.model, label: ctx.label, consult: ctx.consult, flavor, qty, last, price, remove: remove || qty === 0 } : null;
+  return flavor ? { brand: ctx.brand, model: ctx.model, label: ctx.label, note: ctx.note, consult: ctx.consult, flavor, qty, last, price, remove: remove || qty === 0 } : null;
 }
 // Lê: marcas entre linhas ━━━, modelo com preço ("— $ 11,20") ou "— consultar", sabores embaixo,
 // linhas de planilha (TAB) e atualizações curtas ("esgotado", "x20", "0").
 function parseList(text) {
-  const rows = text.split('\n'), ops = [], ctx = { brand: '', model: '', label: '', price: null, consult: false };
+  const rows = text.split('\n').map(fmt), raws = text.split('\n'), ops = [], ctx = { brand: '', model: '', label: '', note: '', price: null, consult: false };
   const ownHit = tk => ownRules.some(r => r.every(k => tk.includes(k)));
   for (let i = 0; i < rows.length; i++) {
-    const raw = rows[i], t = raw.trim();
+    const raw = rows[i], t = raw.trim(), bm = raws[i].match(BULLETRE);
     if (!t || isDeco(t) || TITLE.test(t)) continue;
     if (i > 0 && i + 1 < rows.length && isDeco(rows[i - 1]) && isDeco(rows[i + 1]) && !PRICE.test(t)) {   // MARCA entre linhas decorativas
-      ctx.brand = norm(t); ctx.model = ctx.label = ''; ctx.price = null; ctx.consult = false; continue;
+      ctx.brand = norm(t); ctx.model = ctx.label = ctx.note = ''; ctx.price = null; ctx.consult = false; continue;
     }
     if (raw.includes('\t')) {
       const c = raw.split('\t').map(norm);
@@ -555,18 +558,18 @@ function parseList(text) {
       if (!c[1] || /^sabor$/i.test(c[1])) continue;
       let qty = null, pr = null;
       c.slice(2).forEach(x => { if (/^\$|\d[.,]\d{1,2}$/.test(x)) pr ??= money(x); else if (/^\d+$/.test(x)) qty ??= +x; });
-      ops.push({ brand: ctx.brand, model: ctx.model, label: ctx.label, flavor: c[1], qty, last: false, price: pr, consult: false, remove: qty === 0 }); continue;
+      ops.push({ brand: ctx.brand, model: ctx.model, label: ctx.label, note: ctx.note, flavor: c[1], qty, last: false, price: pr, consult: false, remove: qty === 0 }); continue;
     }
-    const bullet = BULLET.test(raw) && /\S/.test(raw.replace(BULLET, ''));
-    const tt = raw.replace(BULLET, '').trim();
+    const bullet = !!bm, tt = fmt(bm ? bm[1] : raws[i]).trim();
     const isHeader = !bullet && (PRICE.test(tt) || CONSULT.test(tt) || /:\s*$/.test(tt) || !ctx.model || supplierFor(tt) || ownHit(tokens(tt)));
     if (isHeader) {
-      const pm = tt.match(PRICE);
-      ctx.price = pm ? money(pm[0]) : null; ctx.consult = CONSULT.test(tt);
-      const label = norm(tt.replace(PRICE, '').replace(CONSULT, '').replace(/[\s\-–—:]+$/, '')), tk = tokens(label), bt = tokens(ctx.brand);
+      const pm = tt.match(PRICE), cm = pm ? null : tt.match(CONSULT), hit = pm || cm;
+      ctx.price = pm ? money(pm[0]) : null; ctx.consult = !!cm;
+      const label = norm((hit ? tt.slice(0, hit.index) : tt).replace(/[\s\-–—:]+$/, '')), tk = tokens(label), bt = tokens(ctx.brand);
+      ctx.note = hit ? norm(tt.slice(hit.index + hit[0].length).replace(/^[\s\-–—:]+/, '')) : '';   // ex.: "(pré-pedido)"
       ctx.label = label;   // nome como você escreveu; o "model" ganha a marca na frente p/ casar com fornecedor e pedidos
       ctx.model = ctx.brand && !ownHit(tk) && !bt.every(k => tk.includes(k)) ? norm(ctx.brand + ' ' + label) : label;
-      if (ctx.price != null || ctx.consult) ops.push({ header: true, model: ctx.model, price: ctx.price, consult: ctx.consult });
+      if (ctx.price != null || ctx.consult) ops.push({ header: true, model: ctx.model, price: ctx.price, consult: ctx.consult, note: ctx.note });
       continue;
     }
     const o = flavorOps(tt, ctx); if (o) ops.push(o);
@@ -582,10 +585,10 @@ function applyList(ops, mode) {
   const prev = new Map(); old.forEach(x => { if (!prev.has(x.model)) prev.set(x.model, x); });
   const mk = (o, sib) => {
     const price = o.price ?? sib?.price ?? ((o.consult || sib?.consult) ? null : priceFor(o.model));
-    return { brand: o.brand, model: o.model, label: o.label || o.model, flavor: o.flavor, qty: o.qty, last: o.last, price, consult: price == null && !!(o.consult || sib?.consult) };
+    return { brand: o.brand, model: o.model, label: o.label || o.model, note: o.note || '', flavor: o.flavor, qty: o.qty, last: o.last, price, consult: price == null && !!(o.consult || sib?.consult) };
   };
   const addOps = (l, list) => list.forEach(o => {
-    if (o.header) { l.forEach(x => { if (x.model === o.model) { x.price = o.price; x.consult = o.consult; } }); return; }
+    if (o.header) { l.forEach(x => { if (x.model === o.model) { x.price = o.price; x.consult = o.consult; x.note = o.note || ''; } }); return; }
     const i = l.findIndex(x => k(x) === k(o));
     if (o.remove) { if (i >= 0) l.splice(i, 1); return; }
     const it = mk(o, l.find(x => x.model === o.model));
@@ -618,16 +621,19 @@ function listGroups() {
   return [...m];
 }
 const uniPrice = items => items.every(x => plabel(x) === plabel(items[0])) ? plabel(items[0]) : null;
+const SEP = '━━━━━━━━━━━━━━━', HEAD_KEY = 'listahead-v1', HEAD_DEFAULT = 'TWO BROTHERS — LISTA ATUALIZADA';
+const headTitle = () => $('listHead').value.trim() || HEAD_DEFAULT;
+const modelLine = (label, items) => { const u = uniPrice(items), n = items[0].note; return label + (u ? ` — ${u}` : '') + (n ? ` ${n}` : ''); };
+// Mesmo formato que você manda: título, marca entre ━━━, "MODELO — $ 0,00", linha em branco, "* sabor"
 function listText() {
-  const [d, mo] = day().split('-').reverse(), out = [`*LISTA DO DIA ${d}/${mo}*`];
-  let brand = null;
+  const out = [headTitle()]; let brand = null, first = true;
   listGroups().forEach(([model, items]) => {
-    const b = items[0].brand || '';
-    if (b !== brand) { brand = b; if (b) out.push('', `━━━ *${b}* ━━━`); }
-    const uni = uniPrice(items), label = items[0].label || model;
-    out.push('');
-    if (label) out.push(`*${label}*` + (uni ? ` — ${uni}` : ''));
-    items.forEach(x => out.push(`• ${x.flavor}${qlabel(x)}` + (uni === null && plabel(x) ? ` — ${plabel(x)}` : '')));
+    const b = items[0].brand || '', uni = uniPrice(items);
+    if (b !== brand) { brand = b; if (b) { if (!first) out.push(''); out.push(SEP, b, SEP); first = false; } }
+    else out.push('');
+    out.push(modelLine(items[0].label || model, items), '');
+    items.forEach(x => out.push(`* ${x.flavor}${qlabel(x)}` + (uni === null && plabel(x) ? ` — ${plabel(x)}` : '')));
+    first = false;
   });
   return out.join('\n');
 }
@@ -639,7 +645,7 @@ function renderList() {
     const uni = uniPrice(items), label = items[0].label || model, b = items[0].brand || '', out = [];
     if (b !== brand) { brand = b; if (b) out.push(el('div', { style: 'font-weight:700;margin-top:18px;padding-bottom:4px;border-bottom:2px solid var(--line)', textContent: b })); }
     out.push(el('div', {}, el('div', { className: 'sup' }, label || 'Sem modelo',
-      el('span', { className: 'mut', textContent: uni ? ` — ${uni}` : '' }),
+      el('span', { className: 'mut', textContent: (uni ? ` — ${uni}` : '') + (items[0].note ? ` ${items[0].note}` : '') }),
       model ? el('button', { className: 'x', textContent: '✎ preço', onclick: () => {
         const v = prompt(`Preço de ${label} (para todos os sabores; escreva "consultar" se não tiver):`, items[0].price ?? '');
         if (v == null) return;
@@ -659,6 +665,8 @@ function renderList() {
 function listMsg(t) { $('listMsg').textContent = t; }
 function submitList(mode) {
   const ops = parseList($('listText').value);
+  const tl = $('listText').value.split('\n').map(fmt).find(l => /lista\s+atualizada/i.test(l));
+  if (tl) { $('listHead').value = tl.trim(); try { localStorage.setItem(HEAD_KEY, tl.trim()); } catch {} }
   if (!ops.some(o => !o.header)) return listMsg('Não encontrei sabores no texto colado.');
   if (mode === 'all' && curList().length && !confirm('Substituir a lista inteira de hoje?')) return;
   const r = applyList(ops, mode);
@@ -686,6 +694,8 @@ function shift(n) { const d = new Date(day() + 'T12:00'); d.setDate(d.getDate() 
 $('tab-orders').onclick = () => tab('orders');
 $('tab-buy').onclick = () => tab('buy');
 $('tab-list').onclick = () => tab('list');
+try { $('listHead').value = localStorage.getItem(HEAD_KEY) || HEAD_DEFAULT; } catch { $('listHead').value = HEAD_DEFAULT; }
+$('listHead').onchange = e => { try { localStorage.setItem(HEAD_KEY, e.target.value); } catch {} };
 $('listMerge').onclick = () => submitList('models');
 $('listAdd').onclick = () => submitList('add');
 $('listReplace').onclick = () => submitList('all');
