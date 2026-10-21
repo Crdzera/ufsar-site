@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pedidos do Dia</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --ink:#1c1f26; --mut:#6b7280; --line:#e3e6eb; --pri:#4f46e5; --ok:#16a34a; --warn:#d97706; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161b; --card:#1d2027; --ink:#eceef2; --mut:#9aa1ad; --line:#2d313a; --pri:#818cf8; --ok:#4ade80; --warn:#fbbf24; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.4 system-ui,sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; padding:14px 16px; background:var(--card); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+  h1 { font-size:18px; margin:0; }
+  main { max-width:900px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  .card h2 { font-size:15px; margin:0 0 10px; }
+  .tabs { display:flex; gap:6px; margin-bottom:14px; }
+  .tabs button { flex:1; }
+  button, input, select, textarea { font:inherit; color:inherit; }
+  input, select, textarea { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px 10px; width:100%; }
+  textarea { min-height:110px; resize:vertical; }
+  button { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 12px; cursor:pointer; }
+  button.pri { background:var(--pri); border-color:var(--pri); color:#fff; }
+  button.ok { background:var(--ok); border-color:var(--ok); color:#fff; }
+  button.on { border-color:var(--pri); color:var(--pri); font-weight:600; }
+  button.x { padding:2px 8px; color:var(--mut); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .row > * { flex:1 1 140px; }
+  .row > .sm { flex:0 0 90px; }
+  label { display:block; font-size:12px; color:var(--mut); margin-bottom:3px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:7px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:12px; color:var(--mut); font-weight:600; }
+  td.n, th.n { text-align:right; white-space:nowrap; }
+  .tag { font-size:11px; padding:1px 7px; border-radius:99px; border:1px solid var(--line); color:var(--mut); }
+  .tag.ok { color:var(--ok); border-color:var(--ok); }
+  .tag.warn { color:var(--warn); border-color:var(--warn); }
+  .mut { color:var(--mut); font-size:13px; }
+  .big { font-size:22px; font-weight:700; }
+  .empty { color:var(--mut); text-align:center; padding:18px 0; }
+  details summary { cursor:pointer; color:var(--mut); font-size:13px; }
+  .hide { display:none; }
+  .sup { margin:16px 0 6px; font-weight:600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📦 Pedidos do Dia</h1>
+  <div class="row" style="flex:0 1 auto;align-items:center">
+    <button id="prev">◀</button>
+    <input type="date" id="date" style="width:auto">
+    <button id="next">▶</button>
+    <button id="today">Hoje</button>
+  </div>
+</header>
+
+<main>
+  <div class="tabs">
+    <button id="tab-orders" class="on">1. Pedidos recebidos</button>
+    <button id="tab-buy">2. Compra consolidada</button>
+  </div>
+
+  <!-- ABA PEDIDOS -->
+  <section id="view-orders">
+    <div class="card">
+      <h2>Novo pedido</h2>
+      <div class="row">
+        <div><label>Cliente</label><input id="client" list="clients" placeholder="Nome do cliente" autocomplete="off"></div>
+        <div><label>Fornecedor (opcional)</label><input id="supplier" list="suppliers" placeholder="Para quem você compra" autocomplete="off"></div>
+      </div>
+      <div style="margin:10px 0 4px"><label>Itens — um por linha (ex.: <b>3x Ignite V50 Menta</b> ou <b>2 Elfbar BC5000 Uva</b>)</label>
+        <textarea id="items" placeholder="3x Ignite V50 Menta&#10;2x Elfbar BC5000 Uva&#10;1x Nossa Marca Morango"></textarea></div>
+      <div class="row" style="align-items:center">
+        <label style="display:flex;gap:6px;align-items:center;margin:0;flex:1 1 220px">
+          <input type="checkbox" id="own" style="width:auto"> Marca própria (sai do estoque, não entra na compra)
+        </label>
+        <button class="pri" id="add" style="flex:0 0 auto">Adicionar pedido</button>
+      </div>
+      <div class="mut" id="addmsg" style="margin-top:6px"></div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="align-items:center">
+        <h2 style="margin:0" id="ordersTitle">Pedidos</h2>
+      </div>
+      <div id="ordersList"></div>
+    </div>
+  </section>
+
+  <!-- ABA COMPRA -->
+  <section id="view-buy" class="hide">
+    <div class="card">
+      <div class="row" style="align-items:center">
+        <div><div class="mut">A comprar neste dia</div><div class="big" id="buyTotal">0</div></div>
+        <div style="flex:0 0 auto" class="row">
+          <button id="copy">📋 Copiar lista</button>
+          <button id="csv">⬇ CSV</button>
+          <button id="done" class="ok">✔ Marcar como comprado</button>
+        </div>
+      </div>
+    </div>
+    <div id="buyList"></div>
+    <div class="card" id="ownCard" style="display:none">
+      <h2>Marca própria (separar do estoque)</h2>
+      <div id="ownList"></div>
+    </div>
+  </section>
+
+  <div class="card">
+    <details>
+      <summary>Backup dos dados</summary>
+      <p class="mut">Os dados ficam salvos neste navegador. Baixe um backup de vez em quando.</p>
+      <div class="row">
+        <button id="exp">Baixar backup (.json)</button>
+        <button id="imp">Restaurar backup</button>
+        <input type="file" id="file" accept=".json" class="hide">
+      </div>
+    </details>
+  </div>
+</main>
+
+<datalist id="clients"></datalist>
+<datalist id="suppliers"></datalist>
+
+<script>
+const KEY = 'pedidos-v1';
+let lines = load();               // cada linha: {id,date,client,supplier,product,qty,own,bought}
+const $ = id => document.getElementById(id);
+
+function load() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } }
+function save() { localStorage.setItem(KEY, JSON.stringify(lines)); }
+const iso = d => new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+const norm = s => s.trim().replace(/\s+/g,' ');
+const key = s => norm(s).toLowerCase();
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+function el(tag, props = {}, ...kids) {
+  const e = Object.assign(document.createElement(tag), props);
+  kids.flat().forEach(k => e.append(k));
+  return e;
+}
+
+$('date').value = iso(new Date());
+const day = () => $('date').value;
+const dayLines = () => lines.filter(l => l.date === day());
+
+// "3x Ignite V50 Menta" | "3 Ignite..." | "Ignite... x3" | "Ignite..." (qtd 1)
+function parseLine(s) {
+  s = norm(s);
+  if (!s) return null;
+  let m = s.match(/^(\d+)\s*[xX]?\s+(.+)$/) || s.match(/^(\d+)[xX]\s*(.+)$/);
+  if (m) return { qty: +m[1], product: norm(m[2]) };
+  m = s.match(/^(.+?)\s*[xX]\s*(\d+)$/);
+  if (m) return { qty: +m[2], product: norm(m[1]) };
+  return { qty: 1, product: s };
+}
+
+function addOrder() {
+  const client = norm($('client').value);
+  if (!client) return msg('Informe o cliente.');
+  const parsed = $('items').value.split('\n').map(parseLine).filter(Boolean);
+  if (!parsed.length) return msg('Informe pelo menos um item.');
+  parsed.forEach(p => lines.push({
+    id: uid(), date: day(), client, supplier: norm($('supplier').value),
+    product: p.product, qty: p.qty, own: $('own').checked, bought: false,
+  }));
+  save();
+  $('items').value = ''; $('client').value = ''; $('own').checked = false;
+  msg(`✔ ${parsed.length} item(ns) de ${client} adicionados.`);
+  $('client').focus();
+  render();
+}
+function msg(t) { $('addmsg').textContent = t; }
+
+function render() {
+  const ls = dayLines();
+  renderOrders(ls);
+  renderBuy(ls);
+  $('clients').replaceChildren(...[...new Set(lines.map(l => l.client))].map(v => el('option', { value: v })));
+  $('suppliers').replaceChildren(...[...new Set(lines.map(l => l.supplier).filter(Boolean))].map(v => el('option', { value: v })));
+}
+
+function renderOrders(ls) {
+  const box = $('ordersList');
+  $('ordersTitle').textContent = `Pedidos do dia (${ls.length} itens)`;
+  if (!ls.length) return box.replaceChildren(el('div', { className: 'empty', textContent: 'Nenhum pedido neste dia.' }));
+  const byClient = {};
+  ls.forEach(l => (byClient[l.client] ||= []).push(l));
+  box.replaceChildren(...Object.entries(byClient).map(([c, items]) => {
+    const t = el('table', {}, ...items.map(l => el('tr', {},
+      el('td', { className: 'n', textContent: l.qty + 'x' }),
+      el('td', {}, l.product + ' ',
+        l.own ? el('span', { className: 'tag', textContent: 'própria' }) : '',
+        l.supplier ? el('span', { className: 'tag', textContent: l.supplier }) : '',
+        l.bought ? el('span', { className: 'tag ok', textContent: 'comprado' }) : (l.own ? '' : el('span', { className: 'tag warn', textContent: 'a comprar' }))),
+      el('td', { className: 'n' },
+        el('button', { className: 'x', textContent: '✎', title: 'Editar quantidade', onclick: () => editQty(l) }),
+        el('button', { className: 'x', textContent: '✕', title: 'Remover', onclick: () => { lines = lines.filter(x => x.id !== l.id); save(); render(); } }))
+    )));
+    return el('div', {}, el('div', { className: 'sup', textContent: c }), t);
+  }));
+}
+function editQty(l) {
+  const v = parseInt(prompt(`Nova quantidade para "${l.product}":`, l.qty), 10);
+  if (v > 0) { l.qty = v; save(); render(); }
+}
+
+// ---- Consolidação: soma por produto (ignorando maiúsculas/espaços), agrupada por fornecedor
+function consolidate(ls) {
+  const groups = {};
+  ls.filter(l => !l.own && !l.bought).forEach(l => {
+    const sup = l.supplier || 'Sem fornecedor definido';
+    const g = (groups[sup] ||= {});
+    const p = (g[key(l.product)] ||= { product: l.product, qty: 0, who: {} });
+    p.qty += l.qty;
+    p.who[l.client] = (p.who[l.client] || 0) + l.qty;
+  });
+  return groups;
+}
+function renderBuy(ls) {
+  const groups = consolidate(ls);
+  const sups = Object.keys(groups).sort();
+  const total = sups.reduce((a, s) => a + Object.values(groups[s]).reduce((b, p) => b + p.qty, 0), 0);
+  $('buyTotal').textContent = total + ' unidades';
+  const box = $('buyList');
+  if (!sups.length) box.replaceChildren(el('div', { className: 'card empty', textContent: 'Nada pendente de compra neste dia.' }));
+  else box.replaceChildren(...sups.map(s => {
+    const rows = Object.values(groups[s]).sort((a, b) => a.product.localeCompare(b.product));
+    return el('div', { className: 'card' },
+      el('h2', { textContent: `${s} — ${rows.reduce((a, p) => a + p.qty, 0)} un.` }),
+      el('table', {},
+        el('tr', {}, el('th', { className: 'n', textContent: 'Qtd' }), el('th', { textContent: 'Produto' }), el('th', { textContent: 'Clientes' })),
+        ...rows.map(p => el('tr', {},
+          el('td', { className: 'n', textContent: p.qty }),
+          el('td', { textContent: p.product }),
+          el('td', { className: 'mut', textContent: Object.entries(p.who).map(([c, q]) => `${c} (${q})`).join(', ') })))));
+  }));
+  const own = ls.filter(l => l.own);
+  $('ownCard').style.display = own.length ? '' : 'none';
+  $('ownList').replaceChildren(el('table', {}, ...own.map(l => el('tr', {},
+    el('td', { className: 'n', textContent: l.qty + 'x' }), el('td', { textContent: l.product }), el('td', { className: 'mut', textContent: l.client })))));
+}
+
+function buyText() {
+  const groups = consolidate(dayLines());
+  const [d, m, y] = day().split('-').reverse();
+  const out = [`Pedido ${d}/${m}/${y}`];
+  Object.keys(groups).sort().forEach(s => {
+    out.push('', `*${s}*`);
+    Object.values(groups[s]).sort((a, b) => a.product.localeCompare(b.product))
+      .forEach(p => out.push(`${p.qty}x ${p.product}`));
+  });
+  return out.join('\n');
+}
+async function copyList() {
+  const t = buyText();
+  try { await navigator.clipboard.writeText(t); $('copy').textContent = '✔ Copiado!'; }
+  catch { prompt('Copie o texto abaixo:', t); }
+  setTimeout(() => $('copy').textContent = '📋 Copiar lista', 1500);
+}
+function download(name, content, type) {
+  const a = el('a', { href: URL.createObjectURL(new Blob([content], { type })), download: name });
+  a.click(); URL.revokeObjectURL(a.href);
+}
+function csvCell(v) { return /[",;\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+function exportCsv() {
+  const groups = consolidate(dayLines());
+  const rows = [['Fornecedor', 'Produto', 'Quantidade', 'Clientes']];
+  Object.keys(groups).sort().forEach(s => Object.values(groups[s]).forEach(p =>
+    rows.push([s, p.product, String(p.qty), Object.entries(p.who).map(([c, q]) => `${c} (${q})`).join(', ')])));
+  download(`compra-${day()}.csv`, '﻿' + rows.map(r => r.map(csvCell).join(';')).join('\n'), 'text/csv');
+}
+function markDone() {
+  const pend = dayLines().filter(l => !l.own && !l.bought);
+  if (!pend.length) return;
+  if (!confirm(`Marcar ${pend.length} itens de ${day().split('-').reverse().join('/')} como comprados?`)) return;
+  pend.forEach(l => l.bought = true); save(); render();
+}
+
+// ---- navegação
+function tab(which) {
+  $('view-orders').classList.toggle('hide', which !== 'orders');
+  $('view-buy').classList.toggle('hide', which !== 'buy');
+  $('tab-orders').classList.toggle('on', which === 'orders');
+  $('tab-buy').classList.toggle('on', which === 'buy');
+}
+function shift(n) { const d = new Date(day() + 'T12:00'); d.setDate(d.getDate() + n); $('date').value = iso(d); render(); }
+
+$('tab-orders').onclick = () => tab('orders');
+$('tab-buy').onclick = () => tab('buy');
+$('add').onclick = addOrder;
+$('copy').onclick = copyList;
+$('csv').onclick = exportCsv;
+$('done').onclick = markDone;
+$('date').onchange = render;
+$('prev').onclick = () => shift(-1);
+$('next').onclick = () => shift(1);
+$('today').onclick = () => { $('date').value = iso(new Date()); render(); };
+$('exp').onclick = () => download(`backup-pedidos-${iso(new Date())}.json`, JSON.stringify(lines), 'application/json');
+$('imp').onclick = () => $('file').click();
+$('file').onchange = async e => {
+  try {
+    const data = JSON.parse(await e.target.files[0].text());
+    if (!Array.isArray(data)) throw 0;
+    if (confirm('Isso substitui todos os dados atuais. Continuar?')) { lines = data; save(); render(); }
+  } catch { alert('Arquivo de backup inválido.'); }
+  e.target.value = '';
+};
+render();
+</script>
+</body>
+</html>
