@@ -125,7 +125,7 @@
   <section id="view-list" class="hide">
     <div class="card">
       <h2>Atualizar a lista</h2>
-      <label>Cole a lista nova ou só a atualização. Cabeçalho de modelo com preço ou terminado em “:” e os sabores embaixo (um por linha, com ou sem “-”); ou linhas da planilha (modelo, sabor, qtd, preço). Sabor com “esgotado” ou qtd 0 sai da lista.</label>
+      <label>Cole a lista nova ou só a atualização. Aceita o seu formato (marca entre linhas ━━━, modelo “— $ 11,20” ou “— consultar”, sabores embaixo, “— últimas 100 un”) e também linhas da planilha. Para tirar um sabor, escreva “esgotado” ao lado dele ou qtd 0.</label>
       <textarea id="listText" placeholder="NICKBAR 10K $5,75&#10;- Grape Ice&#10;- Miami Mint (20 un.)&#10;- Strawberry Ice esgotado&#10;&#10;ELFBAR BC 15K:&#10;- Ice Mint"></textarea>
       <div class="row" style="margin-top:8px">
         <button class="pri" id="listMerge">Atualizar lista (soma ao que já tem)</button>
@@ -516,51 +516,72 @@ const LIST_KEY = 'listas-v1';
 let listas = {}; try { listas = JSON.parse(localStorage.getItem(LIST_KEY)) || {}; } catch {}
 const saveListas = () => { try { localStorage.setItem(LIST_KEY, JSON.stringify(listas)); } catch {} };
 const curList = () => listas[day()] ||= [];
-const BULLET = /^[\s\-–•*·▪►>]+/;
+const BULLET = /^[\s\-–—•*·▪►>]+/;
 const GONE = /\b(esgotad[oa]|zerad[oa]|sem estoque|acabou|indispon[ií]vel)\b/i;
 const PRICE = /\$\s*\d[\d.,]*/;
-function flavorOps(text, model, price) {                  // "Grape Ice (20 un.)" -> {flavor, qty, remove}
-  let t = text.replace(BULLET, ''), remove = GONE.test(t), qty = null, m;
+const CONSULT = /\bconsultar\b/i;
+const TITLE = /lista\s+(atualizada|do dia)/i;
+const LAST = /[-–—]\s*[úu]ltimas?\s+(\d+)\s*(?:un|und|pcs|pç)?\.?\s*$/i;
+const isDeco = t => t.trim().length >= 3 && !/[A-Za-z0-9À-ÿ]/.test(t);   // linha só de ━━━━ ou ----
+const plabel = x => x.price != null ? brl(x.price) : (x.consult ? 'consultar' : '');
+const qlabel = x => x.qty == null ? '' : x.last ? ` — últimas ${x.qty} un` : ` (${x.qty} un.)`;
+
+function flavorOps(text, ctx) {          // "Grape Ice — últimas 100 un" | "Grape (20 un.)" | "Grape x20" | "Grape esgotado"
+  let t = text.replace(BULLET, ''), remove = GONE.test(t), qty = null, last = false, price = ctx.price, m;
   t = t.replace(GONE, '');
   const pm = t.match(PRICE); if (pm) { price = money(pm[0]); t = t.replace(PRICE, ''); }
-  if ((m = t.match(/[\(\[]\s*(\d+)\s*(?:un|und|pcs|pç|pecas|peças)?\.?\s*[\)\]]\s*$/i)) || (m = t.match(/[-–:]\s*(\d+)\s*(?:un|und|pcs|pç|pecas|peças)\.?\s*$/i)) || (m = t.match(/\bx\s*(\d+)\s*$/i)) || (m = t.match(/\s(0)\s*$/))) {
-    qty = +m[1]; t = t.slice(0, m.index);
-  }
-  const flavor = norm(t.replace(/[\s\-–:,]+$/, ''));
-  return flavor ? { model, flavor, qty, price, remove: remove || qty === 0 } : null;
+  if ((m = t.match(LAST))) { last = true; qty = +m[1]; t = t.slice(0, m.index); }
+  else if ((m = t.match(/[\(\[]\s*(\d+)\s*(?:un|und|pcs|pç|pecas|peças)?\.?\s*[\)\]]\s*$/i)) || (m = t.match(/[-–—:]\s*(\d+)\s*(?:un|und|pcs|pç|pecas|peças)\.?\s*$/i))
+        || (m = t.match(/\bx\s*(\d+)\s*$/i)) || (m = t.match(/\s(0)\s*$/))) { qty = +m[1]; t = t.slice(0, m.index); }
+  const flavor = norm(t.replace(/[\s\-–—:,]+$/, ''));
+  return flavor ? { brand: ctx.brand, model: ctx.model, label: ctx.label, consult: ctx.consult, flavor, qty, last, price, remove: remove || qty === 0 } : null;
 }
+// Lê: marcas entre linhas ━━━, modelo com preço ("— $ 11,20") ou "— consultar", sabores embaixo,
+// linhas de planilha (TAB) e atualizações curtas ("esgotado", "x20", "0").
 function parseList(text) {
-  const ops = []; let model = '', price = null, prev = '';
-  for (const raw of text.split('\n')) {
-    if (!raw.trim()) { prev = ''; continue; }
-    if (raw.includes('\t')) {                              // linha de planilha
-      const c = raw.split('\t').map(norm); if (c[0]) model = c[0];
+  const rows = text.split('\n'), ops = [], ctx = { brand: '', model: '', label: '', price: null, consult: false };
+  const ownHit = tk => ownRules.some(r => r.every(k => tk.includes(k)));
+  for (let i = 0; i < rows.length; i++) {
+    const raw = rows[i], t = raw.trim();
+    if (!t || isDeco(t) || TITLE.test(t)) continue;
+    if (i > 0 && i + 1 < rows.length && isDeco(rows[i - 1]) && isDeco(rows[i + 1]) && !PRICE.test(t)) {   // MARCA entre linhas decorativas
+      ctx.brand = norm(t); ctx.model = ctx.label = ''; ctx.price = null; ctx.consult = false; continue;
+    }
+    if (raw.includes('\t')) {
+      const c = raw.split('\t').map(norm);
+      if (c[0]) { ctx.model = ctx.label = c[0]; }
       if (!c[1] || /^sabor$/i.test(c[1])) continue;
       let qty = null, pr = null;
       c.slice(2).forEach(x => { if (/^\$|\d[.,]\d{1,2}$/.test(x)) pr ??= money(x); else if (/^\d+$/.test(x)) qty ??= +x; });
-      ops.push({ model, flavor: c[1], qty, price: pr, remove: qty === 0 }); continue;
+      ops.push({ brand: ctx.brand, model: ctx.model, label: ctx.label, flavor: c[1], qty, last: false, price: pr, consult: false, remove: qty === 0 }); continue;
     }
     const bullet = BULLET.test(raw) && /\S/.test(raw.replace(BULLET, ''));
-    const t = raw.replace(BULLET, '').trim(), hasPrice = PRICE.test(t);
-    const isHeader = !bullet && (hasPrice || /:\s*$/.test(t) || !model || supplierFor(t) || ownRules.some(r => r.every(k => tokens(t).includes(k))));
+    const tt = raw.replace(BULLET, '').trim();
+    const isHeader = !bullet && (PRICE.test(tt) || CONSULT.test(tt) || /:\s*$/.test(tt) || !ctx.model || supplierFor(tt) || ownHit(tokens(tt)));
     if (isHeader) {
-      const pm = t.match(PRICE); price = pm ? money(pm[0]) : null;
-      model = norm(t.replace(PRICE, '').replace(/[\s\-–:]+$/, ''));
-      if (price != null) ops.push({ model, header: true, price }); continue;
+      const pm = tt.match(PRICE);
+      ctx.price = pm ? money(pm[0]) : null; ctx.consult = CONSULT.test(tt);
+      const label = norm(tt.replace(PRICE, '').replace(CONSULT, '').replace(/[\s\-–—:]+$/, '')), tk = tokens(label), bt = tokens(ctx.brand);
+      ctx.label = label;   // nome como você escreveu; o "model" ganha a marca na frente p/ casar com fornecedor e pedidos
+      ctx.model = ctx.brand && !ownHit(tk) && !bt.every(k => tk.includes(k)) ? norm(ctx.brand + ' ' + label) : label;
+      if (ctx.price != null || ctx.consult) ops.push({ header: true, model: ctx.model, price: ctx.price, consult: ctx.consult });
+      continue;
     }
-    const o = flavorOps(t, model, price); if (o) ops.push(o);
+    const o = flavorOps(tt, ctx); if (o) ops.push(o);
   }
   return ops;
 }
 function applyList(ops, replace) {
   const l = replace ? [] : curList(), k = o => key(o.model + ' ' + o.flavor);
   ops.forEach(o => {
-    if (o.header) { l.forEach(x => { if (x.model === o.model) x.price = o.price; }); return; }   // preço novo vale p/ o modelo todo
+    if (o.header) { l.forEach(x => { if (x.model === o.model) { x.price = o.price; x.consult = o.consult; } }); return; }   // preço novo vale p/ o modelo todo
     const i = l.findIndex(x => k(x) === k(o));
     if (o.remove) { if (i >= 0) l.splice(i, 1); return; }
-    const price = o.price ?? (i >= 0 ? l[i].price : null) ?? l.find(x => x.model === o.model && x.price != null)?.price ?? priceFor(o.model);
-    if (i >= 0) l[i] = { ...l[i], price, qty: o.qty ?? l[i].qty };
-    else l.push({ model: o.model, flavor: o.flavor, qty: o.qty, price });
+    const sib = l.find(x => x.model === o.model);
+    const price = o.price ?? (i >= 0 ? l[i].price : null) ?? sib?.price ?? ((o.consult || sib?.consult) ? null : priceFor(o.model));
+    const consult = price == null && !!(o.consult || (i >= 0 && l[i].consult) || sib?.consult);
+    if (i >= 0) l[i] = { ...l[i], price, consult, qty: o.qty ?? l[i].qty, last: o.qty != null ? o.last : l[i].last };
+    else l.push({ brand: o.brand, model: o.model, label: o.label || o.model, flavor: o.flavor, qty: o.qty, last: o.last, price, consult });
   });
   listas[day()] = l; saveListas();
 }
@@ -568,34 +589,43 @@ function listGroups() {
   const m = new Map(); curList().forEach(x => { if (!m.has(x.model)) m.set(x.model, []); m.get(x.model).push(x); });
   return [...m];
 }
+const uniPrice = items => items.every(x => plabel(x) === plabel(items[0])) ? plabel(items[0]) : null;
 function listText() {
   const [d, mo] = day().split('-').reverse(), out = [`*LISTA DO DIA ${d}/${mo}*`];
+  let brand = null;
   listGroups().forEach(([model, items]) => {
-    const uni = items.every(x => x.price === items[0].price) ? items[0].price : undefined;
+    const b = items[0].brand || '';
+    if (b !== brand) { brand = b; if (b) out.push('', `━━━ *${b}* ━━━`); }
+    const uni = uniPrice(items), label = items[0].label || model;
     out.push('');
-    if (model) out.push(`*${model}*` + (uni != null ? ` — ${brl(uni)}` : ''));
-    items.forEach(x => out.push(`• ${x.flavor}` + (x.qty != null ? ` (${x.qty} un.)` : '') + (uni === undefined && x.price != null ? ` — ${brl(x.price)}` : '')));
+    if (label) out.push(`*${label}*` + (uni ? ` — ${uni}` : ''));
+    items.forEach(x => out.push(`• ${x.flavor}${qlabel(x)}` + (uni === null && plabel(x) ? ` — ${plabel(x)}` : '')));
   });
   return out.join('\n');
 }
 function renderList() {
   const g = listGroups(), n = curList().length;
   $('listTitle').textContent = `Lista de ${day().split('-').reverse().join('/')} (${n} sabores)`;
-  $('listView').replaceChildren(...(g.length ? g.map(([model, items]) => {
-    const uni = items.every(x => x.price === items[0].price) ? items[0].price : undefined;
-    return el('div', {}, el('div', { className: 'sup' }, model || 'Sem modelo',
-      el('span', { className: 'mut', textContent: uni != null ? ` — ${brl(uni)}` : '' }),
+  let brand = null;
+  $('listView').replaceChildren(...(g.length ? g.flatMap(([model, items]) => {
+    const uni = uniPrice(items), label = items[0].label || model, b = items[0].brand || '', out = [];
+    if (b !== brand) { brand = b; if (b) out.push(el('div', { style: 'font-weight:700;margin-top:18px;padding-bottom:4px;border-bottom:2px solid var(--line)', textContent: b })); }
+    out.push(el('div', {}, el('div', { className: 'sup' }, label || 'Sem modelo',
+      el('span', { className: 'mut', textContent: uni ? ` — ${uni}` : '' }),
       model ? el('button', { className: 'x', textContent: '✎ preço', onclick: () => {
-        const v = money(prompt(`Preço de ${model} (para todos os sabores):`, uni ?? ''));
-        if (v != null) { items.forEach(x => x.price = v); saveListas(); render(); } } }) : ''),
+        const v = prompt(`Preço de ${label} (para todos os sabores; escreva "consultar" se não tiver):`, items[0].price ?? '');
+        if (v == null) return;
+        const c = CONSULT.test(v), pr = c ? null : money(v);
+        if (c || pr != null) { items.forEach(x => { x.price = pr; x.consult = c; }); saveListas(); render(); } } }) : ''),
       el('table', {}, ...items.map(x => el('tr', {},
         el('td', { textContent: x.flavor }),
-        el('td', { className: 'n mut', textContent: x.qty != null ? x.qty + ' un.' : '' }),
+        el('td', { className: 'n mut', textContent: x.qty != null ? (x.last ? 'últimas ' : '') + x.qty + ' un.' : '' }),
         el('td', { className: 'n' },
           el('button', { className: 'x', textContent: '✎', title: 'Quantidade disponível', onclick: () => {
             const v = prompt(`Quantidade de "${x.flavor}" (vazio = sem limite):`, x.qty ?? '');
             if (v != null) { x.qty = v.trim() === '' ? null : Math.max(0, parseInt(v, 10) || 0); saveListas(); render(); } } }),
-          el('button', { className: 'x', textContent: '✕', title: 'Tirar da lista (esgotou)', onclick: () => { curList().splice(curList().indexOf(x), 1); saveListas(); render(); } }))))));
+          el('button', { className: 'x', textContent: '✕', title: 'Tirar da lista (esgotou)', onclick: () => { curList().splice(curList().indexOf(x), 1); saveListas(); render(); } })))))));
+    return out;
   }) : [el('div', { className: 'empty', textContent: 'Lista vazia. Cole a lista do dia acima.' })]));
 }
 function listMsg(t) { $('listMsg').textContent = t; }
