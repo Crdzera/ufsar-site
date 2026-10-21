@@ -140,6 +140,7 @@
     <div class="card">
       <div class="row" style="align-items:center">
         <h2 style="margin:0" id="listTitle">Lista do dia</h2>
+        <button id="listClear" style="flex:0 0 auto">🗑 Apagar tudo</button>
         <button class="ok" id="listCopy" style="flex:0 0 auto">📋 Copiar lista completa</button>
       </div>
       <div id="listView"></div>
@@ -700,6 +701,12 @@ $('listMerge').onclick = () => submitList('models');
 $('listAdd').onclick = () => submitList('add');
 $('listReplace').onclick = () => submitList('all');
 $('listYest').onclick = copyYesterday;
+$('listClear').onclick = () => {
+  const n = curList().length;
+  if (!n) return listMsg('A lista de hoje já está vazia.');
+  if (!confirm(`Apagar a lista inteira de ${day().split('-').reverse().join('/')} (${n} sabores)? Isso não pode ser desfeito.`)) return;
+  listas[day()] = []; saveListas(); listMsg('✔ Lista apagada.'); render();
+};
 $('listCopy').onclick = e => copyText(listText(), e.target, '📋 Copiar lista completa');
 $('supText').value = loadSup();
 $('ownText').value = loadOwn();
