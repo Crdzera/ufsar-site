@@ -68,7 +68,7 @@
       <h2>Novo pedido</h2>
       <div class="row">
         <div><label>Cliente (deixe vazio se colar a conversa do WhatsApp com o nome)</label><input id="client" list="clients" placeholder="Nome do cliente" autocomplete="off"></div>
-        <div><label>Fornecedor (opcional)</label><input id="supplier" list="suppliers" placeholder="Para quem você compra" autocomplete="off"></div>
+        <div><label>Forçar fornecedor (opcional — normalmente é automático)</label><input id="supplier" list="suppliers" placeholder="Para quem você compra" autocomplete="off"></div>
       </div>
       <div style="margin:10px 0 4px"><label>Cole aqui a conversa do WhatsApp, as linhas da sua planilha, ou digite um item por linha (<b>3x Ignite V50 Menta</b>)</label>
         <textarea id="items" placeholder="[10:32, 21/10/2026] João: 3x Ignite V50 Menta&#10;2x Elfbar BC5000 Uva"></textarea></div>
@@ -109,6 +109,18 @@
   </section>
 
   <div class="card">
+    <details id="supBox">
+      <summary>Fornecedores e modelos</summary>
+      <p class="mut">Um fornecedor por bloco (separe os blocos com uma linha em branco). A 1ª linha é o nome do fornecedor; as demais são os modelos dele. Vale o nome parcial: <b>elfbar</b> pega todos os modelos Elfbar. O modelo mais específico ganha.</p>
+      <textarea id="supText" style="min-height:260px"></textarea>
+      <div class="row" style="margin-top:8px;align-items:center">
+        <button class="pri" id="supSave" style="flex:0 0 auto">Salvar fornecedores</button>
+        <span class="mut" id="supMsg"></span>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
     <details>
       <summary>Backup dos dados</summary>
       <p class="mut">Os dados ficam salvos neste navegador. Baixe um backup de vez em quando.</p>
@@ -144,6 +156,47 @@ function el(tag, props = {}, ...kids) {
 $('date').value = iso(new Date());
 const day = () => $('date').value;
 const dayLines = () => lines.filter(l => l.date === day());
+
+// ---- Fornecedores: cada modelo pertence a um fornecedor (casamento por palavras, o mais específico ganha)
+const SUP_KEY = 'fornecedores-v1';
+const SUP_DEFAULT = `WORLD
+ignite v155
+ignite v500
+ignite p100
+ignite v120
+ignite v150
+ignite v55
+ignite v-mix 40k
+
+H3
+ignite v400 icy
+ignite v400 ice ultra slim
+ignite v250
+ignite v80
+ignite v frozen 20k
+nikbar 10k
+nikbar 20k
+
+APEX
+elfbar`;
+const tokens = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/nickbar/g, 'nikbar').replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+function loadSup() { try { return localStorage.getItem(SUP_KEY) || SUP_DEFAULT; } catch { return SUP_DEFAULT; } }
+function buildRules(text) {
+  const rules = [];
+  text.split(/\n\s*\n/).forEach(block => {
+    const ls = block.split('\n').map(norm).filter(Boolean);
+    ls.slice(1).forEach(m => rules.push({ sup: ls[0], tk: tokens(m) }));
+  });
+  return rules;
+}
+let rules = buildRules(loadSup());
+function supplierFor(name) {
+  const set = new Set(tokens(name));
+  let best = null;
+  rules.forEach(r => { if (r.tk.length && r.tk.every(t => set.has(t)) && (!best || r.tk.length > best.tk.length)) best = r; });
+  return best ? best.sup : '';
+}
+const supplierOf = l => l.supplier || supplierFor(l.model || l.product);
 
 // "3x Ignite V50 Menta" | "3 Ignite..." | "Ignite... x3" | "Ignite..." (qtd 1)
 function parseLine(s) {
@@ -219,7 +272,7 @@ function render() {
   renderOrders(ls);
   renderBuy(ls);
   $('clients').replaceChildren(...[...new Set(lines.map(l => l.client))].map(v => el('option', { value: v })));
-  $('suppliers').replaceChildren(...[...new Set(lines.map(l => l.supplier).filter(Boolean))].map(v => el('option', { value: v })));
+  $('suppliers').replaceChildren(...[...new Set(rules.map(r => r.sup))].map(v => el('option', { value: v })));
 }
 
 function renderOrders(ls) {
@@ -233,7 +286,7 @@ function renderOrders(ls) {
       el('td', { className: 'n', textContent: l.qty + 'x' }),
       el('td', {}, l.product + ' ',
         l.own ? el('span', { className: 'tag', textContent: 'própria' }) : '',
-        l.supplier ? el('span', { className: 'tag', textContent: l.supplier }) : '',
+        l.own ? '' : (supplierOf(l) ? el('span', { className: 'tag', textContent: supplierOf(l) }) : el('span', { className: 'tag warn', textContent: 'sem fornecedor' })),
         l.bought ? el('span', { className: 'tag ok', textContent: 'comprado' }) : (l.own ? '' : el('span', { className: 'tag warn', textContent: 'a comprar' }))),
       el('td', { className: 'n mut', textContent: l.price != null ? brl(l.price * l.qty) : '' }),
       el('td', { className: 'n' },
@@ -252,7 +305,7 @@ function editQty(l) {
 function consolidate(ls) {
   const groups = {};
   ls.filter(l => !l.own && !l.bought).forEach(l => {
-    const sup = l.supplier || 'Sem fornecedor definido';
+    const sup = supplierOf(l) || 'Sem fornecedor definido';
     const g = (groups[sup] ||= {});
     const p = (g[key(l.product)] ||= { product: l.product, model: l.model || '', flavor: l.flavor || '', qty: 0, price: null, who: {} });
     p.qty += l.qty;
@@ -351,6 +404,12 @@ function shift(n) { const d = new Date(day() + 'T12:00'); d.setDate(d.getDate() 
 
 $('tab-orders').onclick = () => tab('orders');
 $('tab-buy').onclick = () => tab('buy');
+$('supText').value = loadSup();
+$('supSave').onclick = () => {
+  try { localStorage.setItem(SUP_KEY, $('supText').value); } catch {}
+  rules = buildRules($('supText').value); render();
+  $('supMsg').textContent = `✔ Salvo (${rules.length} modelos).`;
+};
 $('add').onclick = addOrder;
 $('copy').onclick = copyList;
 $('csv').onclick = exportCsv;
