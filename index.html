@@ -101,7 +101,19 @@
         </div>
       </div>
     </div>
+    <div class="card">
+      <label style="display:flex;gap:8px;align-items:center;margin:0">Se o fornecedor não tiver tudo, cortar:
+        <select id="alloc" style="width:auto">
+          <option value="fifo">pelos últimos pedidos (ordem de chegada)</option>
+          <option value="prop">proporcional entre os clientes</option>
+        </select></label>
+      <div class="mut" style="margin-top:6px">Preencha “Fornecedor tem” nos itens que faltarem. Toque no nome de um cliente para ajustar quanto ele recebe.</div>
+    </div>
     <div id="buyList"></div>
+    <div class="card" id="shortCard" style="display:none">
+      <h2>⚠ Clientes que vão receber menos</h2>
+      <div id="shortList"></div>
+    </div>
     <div class="card" id="ownCard" style="display:none">
       <h2>Marca própria (separar do estoque)</h2>
       <div id="ownList"></div>
@@ -288,11 +300,13 @@ function render() {
   const ls = dayLines();
   renderOrders(ls);
   renderBuy(ls);
+  renderShort(ls);
   $('clients').replaceChildren(...[...new Set(lines.map(l => l.client))].map(v => el('option', { value: v })));
   $('suppliers').replaceChildren(...[...new Set(rules.map(r => r.sup))].map(v => el('option', { value: v })));
 }
 
 function renderOrders(ls) {
+  const gm = allocateAll(ls);
   const box = $('ordersList');
   $('ordersTitle').textContent = `Pedidos do dia (${ls.length} itens)`;
   if (!ls.length) return box.replaceChildren(el('div', { className: 'empty', textContent: 'Nenhum pedido neste dia.' }));
@@ -304,6 +318,7 @@ function renderOrders(ls) {
       el('td', {}, l.product + ' ',
         isOwn(l) ? el('span', { className: 'tag', textContent: 'própria' }) : '',
         isOwn(l) ? '' : (supplierOf(l) ? el('span', { className: 'tag', textContent: supplierOf(l) }) : el('span', { className: 'tag warn', textContent: 'sem fornecedor' })),
+        !isOwn(l) && gotOf(l, gm) < l.qty ? el('span', { className: 'tag warn', textContent: `⚠ vai ${gotOf(l, gm)} de ${l.qty}` }) : '',
         l.bought ? el('span', { className: 'tag ok', textContent: 'comprado' }) : (isOwn(l) ? '' : el('span', { className: 'tag warn', textContent: 'a comprar' }))),
       el('td', { className: 'n mut', textContent: l.price != null ? brl(l.price * l.qty) : '' }),
       el('td', { className: 'n' },
@@ -318,14 +333,72 @@ function editQty(l) {
   if (v > 0) { l.qty = v; save(); render(); }
 }
 
+// ---- Falta de estoque no fornecedor: "Fornecedor tem" por item, falta dividida entre os clientes
+const AV_KEY = 'disp-v1', MODE_KEY = 'modo-v1';
+let avail = {}; try { avail = JSON.parse(localStorage.getItem(AV_KEY)) || {}; } catch {}
+let mode = 'fifo'; try { mode = localStorage.getItem(MODE_KEY) || 'fifo'; } catch {}
+const availKey = (sup, p) => `${day()}|${key(sup)}|${key(p.product)}`;
+const availFor = (sup, p) => avail[availKey(sup, p)];
+function allocate(p, A) {              // Map: id da linha -> quantidade que o cliente recebe
+  const got = new Map();
+  if (A == null || A >= p.qty) { p.lines.forEach(l => got.set(l.id, l.qty)); return got; }
+  let rem = A;
+  p.lines.filter(l => l.manualGot != null).forEach(l => { const g = Math.min(l.manualGot, l.qty, rem); got.set(l.id, g); rem -= g; });
+  const free = p.lines.filter(l => l.manualGot == null), tot = free.reduce((a, l) => a + l.qty, 0);
+  if (rem >= tot) free.forEach(l => got.set(l.id, l.qty));
+  else if (mode === 'fifo') free.forEach(l => { const g = Math.min(l.qty, rem); got.set(l.id, g); rem -= g; });
+  else {
+    const parts = free.map(l => { const x = l.qty * rem / tot; return { l, g: Math.floor(x), f: x % 1 }; });
+    const left = rem - parts.reduce((a, x) => a + x.g, 0);
+    [...parts].sort((a, b) => b.f - a.f).slice(0, left).forEach(x => x.g++);
+    parts.forEach(x => got.set(x.l.id, x.g));
+  }
+  return got;
+}
+function allocateAll(ls) {
+  const m = new Map();
+  Object.entries(consolidate(ls)).forEach(([sup, g]) => Object.values(g).forEach(p => allocate(p, availFor(sup, p)).forEach((v, id) => m.set(id, v))));
+  return m;
+}
+const gotOf = (l, m) => l.bought ? (l.got ?? l.qty) : (m.get(l.id) ?? l.qty);
+function setAvail(sup, p, raw) {
+  const k = availKey(sup, p), v = raw === '' ? null : Math.max(0, parseInt(raw, 10) || 0);
+  if (v == null) delete avail[k]; else avail[k] = v;
+  p.lines.forEach(l => delete l.manualGot);
+  try { localStorage.setItem(AV_KEY, JSON.stringify(avail)); } catch {}
+  save(); render();
+}
+function adjustLine(l, got) {
+  const v = parseInt(prompt(`${l.client}: pediu ${l.qty}. Quantos ele vai receber?`, got), 10);
+  if (v >= 0) { l.manualGot = Math.min(v, l.qty); save(); render(); }
+}
+function shortageText(client, items) {
+  const [d, m] = day().split('-').reverse();
+  return [`Olá, ${client}! Do seu pedido de ${d}/${m}, o fornecedor não tinha todas as peças:`, '',
+    ...items.map(x => `- ${x.l.product}: pedido ${x.l.qty}, vai ${x.got} (faltam ${x.l.qty - x.got})`)].join('\n');
+}
+function renderShort(ls) {
+  const m = allocateAll(ls), byC = {};
+  ls.filter(l => !isOwn(l)).map(l => ({ l, got: gotOf(l, m) })).filter(x => x.got < x.l.qty).forEach(x => (byC[x.l.client] ||= []).push(x));
+  const cs = Object.keys(byC).sort();
+  $('shortCard').style.display = cs.length ? '' : 'none';
+  $('shortList').replaceChildren(...cs.map(c => el('div', { style: 'margin-bottom:12px' },
+    el('div', { className: 'row', style: 'align-items:center' },
+      el('b', { textContent: c }),
+      el('button', { style: 'flex:0 0 auto', textContent: '📋 Copiar aviso', onclick: e => copyText(shortageText(c, byC[c]), e.target, '📋 Copiar aviso') })),
+    el('table', {}, ...byC[c].map(x => el('tr', {}, el('td', { textContent: x.l.product }),
+      el('td', { className: 'n', textContent: `pediu ${x.l.qty} → vai ${x.got}` })))))));
+}
+
 // ---- Consolidação: soma por produto (ignorando maiúsculas/espaços), agrupada por fornecedor
 function consolidate(ls) {
   const groups = {};
   ls.filter(l => !isOwn(l) && !l.bought).forEach(l => {
     const sup = supplierOf(l) || 'Sem fornecedor definido';
     const g = (groups[sup] ||= {});
-    const p = (g[key(l.product)] ||= { product: l.product, model: l.model || '', flavor: l.flavor || '', qty: 0, price: null, who: {} });
+    const p = (g[key(l.product)] ||= { product: l.product, model: l.model || '', flavor: l.flavor || '', qty: 0, price: null, who: {}, lines: [] });
     p.qty += l.qty;
+    p.lines.push(l);
     if (l.price != null) p.price = l.price;
     p.who[l.client] = (p.who[l.client] || 0) + l.qty;
   });
@@ -349,17 +422,21 @@ function renderBuy(ls) {
   else box.replaceChildren(...sups.map(s => {
     const rows = sortedRows(groups[s]);
     const trs = byModel(rows).flatMap(([model, items]) => [
-      model ? el('tr', {}, el('td', { colSpan: 3, style: 'font-weight:600;padding-top:12px' },
+      model ? el('tr', {}, el('td', { colSpan: 4, style: 'font-weight:600;padding-top:12px' },
         model, el('span', { className: 'mut', textContent: `  ·  ${items.reduce((a, p) => a + p.qty, 0)} un.` }))) : '',
       ...items.map(p => el('tr', {},
         el('td', { className: 'n', textContent: p.qty }),
         el('td', { textContent: model ? p.flavor : p.product }),
-        el('td', { className: 'mut', textContent: Object.entries(p.who).map(([c, q]) => `${c} (${q})`).join(', ') })))]);
+        el('td', {}, el('input', { type: 'number', min: 0, style: 'width:78px', placeholder: String(p.qty), value: availFor(s, p) ?? '',
+          title: 'Quantas peças o fornecedor tem', onchange: e => setAvail(s, p, e.target.value) })),
+        el('td', {}, ...p.lines.map(l => { const g = allocate(p, availFor(s, p)).get(l.id);
+          return el('button', { className: 'x', style: g < l.qty ? 'color:var(--warn)' : '', title: 'Ajustar quanto este cliente recebe',
+            textContent: g < l.qty ? `${l.client} ${l.qty}→${g}` : `${l.client} (${l.qty})`, onclick: () => adjustLine(l, g) }); }))))]);
     return el('div', { className: 'card' },
       el('div', { className: 'row', style: 'align-items:center;margin-bottom:8px' },
         el('h2', { style: 'margin:0', textContent: `${s} — ${rows.reduce((a, p) => a + p.qty, 0)} un.` }),
         el('button', { className: 'pri', style: 'flex:0 0 auto', textContent: '📋 Copiar para WhatsApp', onclick: e => copyText(supplierText(s, rows), e.target, '📋 Copiar para WhatsApp') })),
-      el('table', {}, el('tr', {}, el('th', { className: 'n', textContent: 'Qtd' }), el('th', { textContent: 'Sabor' }), el('th', { textContent: 'Clientes' })), ...trs));
+      el('table', {}, el('tr', {}, el('th', { className: 'n', textContent: 'Qtd' }), el('th', { textContent: 'Sabor' }), el('th', { textContent: 'Fornecedor tem' }), el('th', { textContent: 'Clientes' })), ...trs));
   }));
   const own = ls.filter(l => isOwn(l));
   $('ownCard').style.display = own.length ? '' : 'none';
@@ -405,7 +482,9 @@ function markDone() {
   const pend = dayLines().filter(l => !isOwn(l) && !l.bought);
   if (!pend.length) return;
   if (!confirm(`Marcar ${pend.length} itens de ${day().split('-').reverse().join('/')} como comprados?`)) return;
-  pend.forEach(l => l.bought = true); save(); render();
+  const gm = allocateAll(dayLines());
+  pend.forEach(l => { l.got = gotOf(l, gm); l.bought = true; });
+  save(); render();
 }
 
 // ---- navegação
@@ -426,6 +505,8 @@ $('supSave').onclick = () => {
   rules = buildRules($('supText').value); ownRules = buildOwn($('ownText').value); render();
   $('supMsg').textContent = `✔ Salvo (${rules.length} modelos de fornecedor, ${ownRules.length} da marca própria).`;
 };
+$('alloc').value = mode;
+$('alloc').onchange = e => { mode = e.target.value; try { localStorage.setItem(MODE_KEY, mode); } catch {} render(); };
 $('add').onclick = addOrder;
 $('copy').onclick = copyList;
 $('csv').onclick = exportCsv;
