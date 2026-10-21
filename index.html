@@ -70,7 +70,7 @@
         <div><label>Cliente (deixe vazio se colar a conversa do WhatsApp com o nome)</label><input id="client" list="clients" placeholder="Nome do cliente" autocomplete="off"></div>
         <div><label>Fornecedor (opcional)</label><input id="supplier" list="suppliers" placeholder="Para quem você compra" autocomplete="off"></div>
       </div>
-      <div style="margin:10px 0 4px"><label>Cole aqui a mensagem do WhatsApp (ou digite um item por linha: <b>3x Ignite V50 Menta</b>)</label>
+      <div style="margin:10px 0 4px"><label>Cole aqui a conversa do WhatsApp, as linhas da sua planilha, ou digite um item por linha (<b>3x Ignite V50 Menta</b>)</label>
         <textarea id="items" placeholder="[10:32, 21/10/2026] João: 3x Ignite V50 Menta&#10;2x Elfbar BC5000 Uva"></textarea></div>
       <div class="row" style="align-items:center">
         <label style="display:flex;gap:6px;align-items:center;margin:0;flex:1 1 220px">
@@ -126,7 +126,7 @@
 
 <script>
 const KEY = 'pedidos-v1';
-let lines = load();               // cada linha: {id,date,client,supplier,product,qty,own,bought}
+let lines = load();               // cada linha: {id,date,client,supplier,product,model,flavor,price,qty,own,bought}
 const $ = id => document.getElementById(id);
 
 function load() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } }
@@ -160,25 +160,50 @@ function parseLine(s) {
 // Linhas sem remetente pertencem ao último remetente (ou ao campo Cliente). Vários clientes numa colagem funcionam.
 const WA = /^\u200e?\[?(?:\d{1,2}\/\d{1,2}\/\d{2,4}|\d{1,2}:\d{2}(?::\d{2})?)[,\s]*(?:\d{1,2}\/\d{1,2}\/\d{2,4}|\d{1,2}:\d{2}(?::\d{2})?)?(?:\s*[APap]\.?[Mm]\.?)?\]?\s*[-–]?\s*([^:\n]+?):\s*(.*)$/;
 const CHAT = /^(oi+|ol[aá]|e a[ií]|bom dia|boa tarde|boa noite|obrigad[oa]|valeu|ok(ay)?|blz|beleza|certo|tudo bem|pode ser|fechado|sim|n[aã]o|pix|<m[ií]dia.*|mensagem apagada.*)[\s!.,?]*$/i;
+// Linha colada da planilha (colunas separadas por TAB): MODELO | SABOR | QTD | PREÇO | SUBTOTAL
+// Uma linha "CLIENTE - NOME" troca o cliente. Cabeçalhos e linhas de subtotal vazias são ignorados.
+function money(s) {
+  s = String(s || '').replace(/[^\d,.]/g, '');
+  if (!s) return null;
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+}
+function parseSheetRow(raw, ctx) {
+  const c = raw.split('\t').map(norm);
+  const h = c[0].match(/^cliente\s*[-–:]\s*(.+)$/i);
+  if (h) { ctx.client = norm(h[1]); return null; }
+  if (!/^\d+$/.test(c[2] || '') || !(+c[2] > 0)) return null;
+  const model = c[0] || ctx.model || '', flavor = c[1] || '';
+  ctx.model = model;
+  const product = norm(model + ' ' + flavor);
+  return product ? { client: ctx.client, product, model, flavor, qty: +c[2], price: money(c[3]) } : null;
+}
+const priceFor = model => { const l = [...lines].reverse().find(x => x.model === model && x.price != null); return l ? l.price : null; };
+const brl = n => '$' + n.toFixed(2).replace('.', ',');
+
 function parseChat(text, defaultClient) {
-  let client = defaultClient, out = [];
+  const ctx = { client: defaultClient, model: '' }, out = [];
   for (let raw of text.split('\n')) {
+    const h = raw.match(/^\s*cliente\s*[-–:]\s*([^\t]+?)\s*$/i);
+    if (h) { ctx.client = norm(h[1]); continue; }
+    if (raw.includes('\t')) { const r = parseSheetRow(raw, ctx); if (r) out.push(r); continue; }
     let line = raw, m = line.match(WA);
-    if (m) { client = norm(m[1]); line = m[2]; }
+    if (m) { ctx.client = norm(m[1]); line = m[2]; }
     line = line.replace(/^[\s\-•*·]+/, '');
     const it = parseLine(line);
-    if (it && /[a-zA-ZÀ-ÿ]/.test(it.product) && !CHAT.test(it.product)) out.push({ client, ...it });
+    if (it && /[a-zA-ZÀ-ÿ]/.test(it.product) && !CHAT.test(it.product)) out.push({ client: ctx.client, model: '', flavor: '', price: null, ...it });
   }
   return out;
 }
 
 function addOrder() {
   const parsed = parseChat($('items').value, norm($('client').value));
-  if (!parsed.length) return msg('Cole os itens do pedido.');
+  if (!parsed.length) return msg('Cole os itens do pedido (conversa do WhatsApp ou linhas da planilha).');
   if (parsed.some(p => !p.client)) return msg('Informe o cliente (ou cole a conversa com o nome dele).');
   parsed.forEach(p => lines.push({
     id: uid(), date: day(), client: p.client, supplier: norm($('supplier').value),
-    product: p.product, qty: p.qty, own: $('own').checked, bought: false,
+    product: p.product, model: p.model, flavor: p.flavor, price: p.price ?? priceFor(p.model), qty: p.qty, own: $('own').checked, bought: false,
   }));
   save();
   const nomes = [...new Set(parsed.map(p => p.client))].join(', ');
@@ -210,6 +235,7 @@ function renderOrders(ls) {
         l.own ? el('span', { className: 'tag', textContent: 'própria' }) : '',
         l.supplier ? el('span', { className: 'tag', textContent: l.supplier }) : '',
         l.bought ? el('span', { className: 'tag ok', textContent: 'comprado' }) : (l.own ? '' : el('span', { className: 'tag warn', textContent: 'a comprar' }))),
+      el('td', { className: 'n mut', textContent: l.price != null ? brl(l.price * l.qty) : '' }),
       el('td', { className: 'n' },
         el('button', { className: 'x', textContent: '✎', title: 'Editar quantidade', onclick: () => editQty(l) }),
         el('button', { className: 'x', textContent: '✕', title: 'Remover', onclick: () => { lines = lines.filter(x => x.id !== l.id); save(); render(); } }))
@@ -228,31 +254,43 @@ function consolidate(ls) {
   ls.filter(l => !l.own && !l.bought).forEach(l => {
     const sup = l.supplier || 'Sem fornecedor definido';
     const g = (groups[sup] ||= {});
-    const p = (g[key(l.product)] ||= { product: l.product, qty: 0, who: {} });
+    const p = (g[key(l.product)] ||= { product: l.product, model: l.model || '', flavor: l.flavor || '', qty: 0, price: null, who: {} });
     p.qty += l.qty;
+    if (l.price != null) p.price = l.price;
     p.who[l.client] = (p.who[l.client] || 0) + l.qty;
   });
   return groups;
 }
+const sub = p => p.price != null ? p.price * p.qty : 0;
+// rows -> [[modelo, [linhas]], ...] ordenado; itens sem modelo ficam no grupo ''
+function byModel(rows) {
+  const m = {};
+  rows.forEach(p => (m[p.model] ||= []).push(p));
+  return Object.entries(m).sort(([a], [b]) => (a === '') - (b === '') || a.localeCompare(b))
+    .map(([k, v]) => [k, v.sort((a, b) => a.flavor.localeCompare(b.flavor) || a.product.localeCompare(b.product))]);
+}
 function renderBuy(ls) {
   const groups = consolidate(ls);
   const sups = Object.keys(groups).sort();
-  const total = sups.reduce((a, s) => a + Object.values(groups[s]).reduce((b, p) => b + p.qty, 0), 0);
-  $('buyTotal').textContent = total + ' unidades';
+  const all = sups.flatMap(s => Object.values(groups[s]));
+  $('buyTotal').textContent = all.reduce((a, p) => a + p.qty, 0) + ' unidades · ' + brl(all.reduce((a, p) => a + sub(p), 0));
   const box = $('buyList');
   if (!sups.length) box.replaceChildren(el('div', { className: 'card empty', textContent: 'Nada pendente de compra neste dia.' }));
   else box.replaceChildren(...sups.map(s => {
-    const rows = Object.values(groups[s]).sort((a, b) => a.product.localeCompare(b.product));
+    const rows = sortedRows(groups[s]);
+    const trs = byModel(rows).flatMap(([model, items]) => [
+      model ? el('tr', {}, el('td', { colSpan: 4, style: 'font-weight:600;padding-top:12px' },
+        model, el('span', { className: 'mut', textContent: `  ·  ${items.reduce((a, p) => a + p.qty, 0)} un.` + (items[0].price != null ? ` × ${brl(items[0].price)}` : '') }))) : '',
+      ...items.map(p => el('tr', {},
+        el('td', { className: 'n', textContent: p.qty }),
+        el('td', { textContent: model ? p.flavor : p.product }),
+        el('td', { className: 'n', textContent: p.price != null ? brl(sub(p)) : '' }),
+        el('td', { className: 'mut', textContent: Object.entries(p.who).map(([c, q]) => `${c} (${q})`).join(', ') })))]);
     return el('div', { className: 'card' },
       el('div', { className: 'row', style: 'align-items:center;margin-bottom:8px' },
-        el('h2', { style: 'margin:0', textContent: `${s} — ${rows.reduce((a, p) => a + p.qty, 0)} un.` }),
+        el('h2', { style: 'margin:0', textContent: `${s} — ${rows.reduce((a, p) => a + p.qty, 0)} un. · ${brl(rows.reduce((a, p) => a + sub(p), 0))}` }),
         el('button', { className: 'pri', style: 'flex:0 0 auto', textContent: '📋 Copiar para WhatsApp', onclick: e => copyText(supplierText(s, rows), e.target, '📋 Copiar para WhatsApp') })),
-      el('table', {},
-        el('tr', {}, el('th', { className: 'n', textContent: 'Qtd' }), el('th', { textContent: 'Produto' }), el('th', { textContent: 'Clientes' })),
-        ...rows.map(p => el('tr', {},
-          el('td', { className: 'n', textContent: p.qty }),
-          el('td', { textContent: p.product }),
-          el('td', { className: 'mut', textContent: Object.entries(p.who).map(([c, q]) => `${c} (${q})`).join(', ') })))));
+      el('table', {}, el('tr', {}, el('th', { className: 'n', textContent: 'Qtd' }), el('th', { textContent: 'Sabor' }), el('th', { className: 'n', textContent: 'Subtotal' }), el('th', { textContent: 'Clientes' })), ...trs));
   }));
   const own = ls.filter(l => l.own);
   $('ownCard').style.display = own.length ? '' : 'none';
@@ -260,9 +298,16 @@ function renderBuy(ls) {
     el('td', { className: 'n', textContent: l.qty + 'x' }), el('td', { textContent: l.product }), el('td', { className: 'mut', textContent: l.client })))));
 }
 
+// Texto para o fornecedor: agrupado por modelo, sem preços
 function supplierText(sup, rows) {
   const [d, m] = day().split('-').reverse();
-  return [`Pedido ${d}/${m}${sup.startsWith('Sem ') ? '' : ' - ' + sup}`, '', ...rows.map(p => `${p.qty}x ${p.product}`)].join('\n');
+  const out = [`Pedido ${d}/${m}${sup.startsWith('Sem ') ? '' : ' - ' + sup}`];
+  byModel(rows).forEach(([model, items]) => {
+    out.push('');
+    if (model) out.push(`*${model}*`);
+    items.forEach(p => out.push(`${p.qty}x ${model ? p.flavor : p.product}`));
+  });
+  return out.join('\n');
 }
 function sortedRows(g) { return Object.values(g).sort((a, b) => a.product.localeCompare(b.product)); }
 function buyText() {
@@ -282,10 +327,11 @@ function download(name, content, type) {
 function csvCell(v) { return /[",;\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
 function exportCsv() {
   const groups = consolidate(dayLines());
-  const rows = [['Fornecedor', 'Produto', 'Quantidade', 'Clientes']];
-  Object.keys(groups).sort().forEach(s => Object.values(groups[s]).forEach(p =>
-    rows.push([s, p.product, String(p.qty), Object.entries(p.who).map(([c, q]) => `${c} (${q})`).join(', ')])));
-  download(`compra-${day()}.csv`, '﻿' + rows.map(r => r.map(csvCell).join(';')).join('\n'), 'text/csv');
+  const rows = [['Fornecedor', 'Modelo', 'Sabor', 'Quantidade', 'Preço', 'Subtotal', 'Clientes']];
+  Object.keys(groups).sort().forEach(s => byModel(sortedRows(groups[s])).forEach(([, items]) => items.forEach(p =>
+    rows.push([s, p.model, p.model ? p.flavor : p.product, String(p.qty), p.price != null ? String(p.price).replace('.', ',') : '',
+      p.price != null ? String(sub(p).toFixed(2)).replace('.', ',') : '', Object.entries(p.who).map(([c, q]) => `${c} (${q})`).join(', ')]))));
+  download(`compra-${day()}.csv`, '\ufeff' + rows.map(r => r.map(csvCell).join(';')).join('\n'), 'text/csv');
 }
 function markDone() {
   const pend = dayLines().filter(l => !l.own && !l.bought);
