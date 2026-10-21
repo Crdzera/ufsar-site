@@ -343,24 +343,23 @@ function renderBuy(ls) {
   const groups = consolidate(ls);
   const sups = Object.keys(groups).sort();
   const all = sups.flatMap(s => Object.values(groups[s]));
-  $('buyTotal').textContent = all.reduce((a, p) => a + p.qty, 0) + ' unidades · ' + brl(all.reduce((a, p) => a + sub(p), 0));
+  $('buyTotal').textContent = all.reduce((a, p) => a + p.qty, 0) + ' unidades';
   const box = $('buyList');
   if (!sups.length) box.replaceChildren(el('div', { className: 'card empty', textContent: 'Nada pendente de compra neste dia.' }));
   else box.replaceChildren(...sups.map(s => {
     const rows = sortedRows(groups[s]);
     const trs = byModel(rows).flatMap(([model, items]) => [
-      model ? el('tr', {}, el('td', { colSpan: 4, style: 'font-weight:600;padding-top:12px' },
-        model, el('span', { className: 'mut', textContent: `  ·  ${items.reduce((a, p) => a + p.qty, 0)} un.` + (items[0].price != null ? ` × ${brl(items[0].price)}` : '') }))) : '',
+      model ? el('tr', {}, el('td', { colSpan: 3, style: 'font-weight:600;padding-top:12px' },
+        model, el('span', { className: 'mut', textContent: `  ·  ${items.reduce((a, p) => a + p.qty, 0)} un.` }))) : '',
       ...items.map(p => el('tr', {},
         el('td', { className: 'n', textContent: p.qty }),
         el('td', { textContent: model ? p.flavor : p.product }),
-        el('td', { className: 'n', textContent: p.price != null ? brl(sub(p)) : '' }),
         el('td', { className: 'mut', textContent: Object.entries(p.who).map(([c, q]) => `${c} (${q})`).join(', ') })))]);
     return el('div', { className: 'card' },
       el('div', { className: 'row', style: 'align-items:center;margin-bottom:8px' },
-        el('h2', { style: 'margin:0', textContent: `${s} — ${rows.reduce((a, p) => a + p.qty, 0)} un. · ${brl(rows.reduce((a, p) => a + sub(p), 0))}` }),
+        el('h2', { style: 'margin:0', textContent: `${s} — ${rows.reduce((a, p) => a + p.qty, 0)} un.` }),
         el('button', { className: 'pri', style: 'flex:0 0 auto', textContent: '📋 Copiar para WhatsApp', onclick: e => copyText(supplierText(s, rows), e.target, '📋 Copiar para WhatsApp') })),
-      el('table', {}, el('tr', {}, el('th', { className: 'n', textContent: 'Qtd' }), el('th', { textContent: 'Sabor' }), el('th', { className: 'n', textContent: 'Subtotal' }), el('th', { textContent: 'Clientes' })), ...trs));
+      el('table', {}, el('tr', {}, el('th', { className: 'n', textContent: 'Qtd' }), el('th', { textContent: 'Sabor' }), el('th', { textContent: 'Clientes' })), ...trs));
   }));
   const own = ls.filter(l => isOwn(l));
   $('ownCard').style.display = own.length ? '' : 'none';
@@ -397,10 +396,9 @@ function download(name, content, type) {
 function csvCell(v) { return /[",;\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
 function exportCsv() {
   const groups = consolidate(dayLines());
-  const rows = [['Fornecedor', 'Modelo', 'Sabor', 'Quantidade', 'Preço', 'Subtotal', 'Clientes']];
+  const rows = [['Fornecedor', 'Modelo', 'Sabor', 'Quantidade', 'Clientes']];
   Object.keys(groups).sort().forEach(s => byModel(sortedRows(groups[s])).forEach(([, items]) => items.forEach(p =>
-    rows.push([s, p.model, p.model ? p.flavor : p.product, String(p.qty), p.price != null ? String(p.price).replace('.', ',') : '',
-      p.price != null ? String(sub(p).toFixed(2)).replace('.', ',') : '', Object.entries(p.who).map(([c, q]) => `${c} (${q})`).join(', ')]))));
+    rows.push([s, p.model, p.model ? p.flavor : p.product, String(p.qty), Object.entries(p.who).map(([c, q]) => `${c} (${q})`).join(', ')]))));
   download(`compra-${day()}.csv`, '\ufeff' + rows.map(r => r.map(csvCell).join(';')).join('\n'), 'text/csv');
 }
 function markDone() {
