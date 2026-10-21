@@ -16,8 +16,8 @@
   main { max-width:900px; margin:0 auto; padding:16px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
   .card h2 { font-size:15px; margin:0 0 10px; }
-  .tabs { display:flex; gap:6px; margin-bottom:14px; }
-  .tabs button { flex:1; }
+  .tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
+  .tabs button { flex:1 1 150px; }
   button, input, select, textarea { font:inherit; color:inherit; }
   input, select, textarea { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px 10px; width:100%; }
   textarea { min-height:110px; resize:vertical; }
@@ -61,6 +61,7 @@
     <button id="tab-orders" class="on">1. Pedidos recebidos</button>
     <button id="tab-buy">2. Compra consolidada</button>
     <button id="tab-list">3. Lista do dia</button>
+    <button id="tab-sales">4. Pedidos a vender</button>
   </div>
 
   <!-- ABA PEDIDOS -->
@@ -145,6 +146,28 @@
       </div>
       <div id="listView"></div>
     </div>
+  </section>
+
+  <!-- ABA PEDIDOS A VENDER -->
+  <section id="view-sales" class="hide">
+    <div class="card">
+      <div class="mut">Comprados (ou da marca própria) e ainda não lançados como venda</div>
+      <div class="big" id="salesSummary"></div>
+      <div class="row" style="margin-top:10px;align-items:center">
+        <button id="salesPrintAll" style="flex:0 0 auto">🖨 Imprimir todos</button>
+        <button id="salesDlAll" style="flex:0 0 auto">⬇ Baixar todos (HTML)</button>
+        <button id="salesCsv" style="flex:0 0 auto">⬇ CSV para lançar</button>
+        <label style="display:flex;gap:6px;align-items:center;margin:0;flex:1 1 200px"><input type="checkbox" id="printPrices" style="width:auto"> Mostrar preços na impressão</label>
+      </div>
+      <div class="mut" style="margin-top:6px">Entra aqui o que foi marcado como comprado, já com a quantidade que realmente vai ao cliente. A impressão é para separação (sem preços, a menos que você marque). Se a impressão não abrir, use “Baixar” e imprima o arquivo (Ctrl+P).</div>
+    </div>
+    <div id="salesList"></div>
+    <div class="card"><details><summary>Já lançados no sistema (<span id="soldN">0</span>)</summary><div id="soldList"></div></details></div>
+    <div class="card"><details><summary>Preços por cliente</summary>
+      <p class="mut">Cada cliente tem o seu preço. O sistema guarda o preço que vem na planilha e usa nos próximos pedidos digitados. Edite aqui ou direto no pedido.</p>
+      <div id="cpList"></div>
+      <button id="cpAdd" style="margin-top:8px">＋ Adicionar preço</button>
+    </details></div>
   </section>
 
   <div class="card">
@@ -332,8 +355,9 @@ function addOrder() {
   if (parsed.some(p => !p.client)) return msg('Informe o cliente (ou cole a conversa com o nome dele).');
   parsed.forEach(p => lines.push({
     id: uid(), date: day(), client: p.client, supplier: norm($('supplier').value),
-    product: p.product, model: p.model, flavor: p.flavor, price: p.price ?? priceFor(p.model), qty: p.qty, own: $('own').checked, bought: false,
+    product: p.product, model: p.model, flavor: p.flavor, price: p.price ?? clientPrice(p.client, p.model || p.product), qty: p.qty, own: $('own').checked, bought: false,
   }));
+  parsed.forEach(p => { if (p.price != null) rememberPrice(p.client, p.model || p.product, p.price); });   // guarda o preço deste cliente
   save();
   const nomes = [...new Set(parsed.map(p => p.client))].join(', ');
   $('items').value = ''; $('client').value = ''; $('own').checked = false;
@@ -349,6 +373,7 @@ function render() {
   renderBuy(ls);
   renderShort(ls);
   renderList();
+  renderSales();
   $('clients').replaceChildren(...[...new Set(lines.map(l => l.client))].map(v => el('option', { value: v })));
   $('suppliers').replaceChildren(...[...new Set(rules.map(r => r.sup))].map(v => el('option', { value: v })));
 }
@@ -367,7 +392,7 @@ function renderOrders(ls) {
         isOwn(l) ? el('span', { className: 'tag', textContent: 'própria' }) : '',
         isOwn(l) ? '' : (supplierOf(l) ? el('span', { className: 'tag', textContent: supplierOf(l) }) : el('span', { className: 'tag warn', textContent: 'sem fornecedor' })),
         !isOwn(l) && gotOf(l, gm) < l.qty ? el('span', { className: 'tag warn', textContent: `⚠ vai ${gotOf(l, gm)} de ${l.qty}` }) : '',
-        l.bought ? el('span', { className: 'tag ok', textContent: 'comprado' }) : (isOwn(l) ? '' : el('span', { className: 'tag warn', textContent: 'a comprar' }))),
+        l.sold ? el('span', { className: 'tag ok', textContent: 'lançado' }) : l.bought ? el('span', { className: 'tag ok', textContent: 'comprado' }) : (isOwn(l) ? '' : el('span', { className: 'tag warn', textContent: 'a comprar' }))),
       el('td', { className: 'n mut', textContent: l.price != null ? brl(l.price * l.qty) : '' }),
       el('td', { className: 'n' },
         el('button', { className: 'x', textContent: '✎', title: 'Editar quantidade', onclick: () => editQty(l) }),
@@ -521,7 +546,9 @@ async function copyText(t, btn, label) {
   else await dialog('Não consegui copiar sozinho. Selecione o texto abaixo e copie (Ctrl+C):', { area: t, single: true });
 }
 const copyList = () => copyText(buyText(), $('copy'), '📋 Copiar tudo');
-function download(name, content, type) {
+async function download(name, content, type) {
+  let dl = null; try { dl = await window.claude?.use?.('downloads'); } catch {}
+  if (dl) { try { await dl.save({ filename: name, data: content }); } catch (e) { if (e?.code !== 'unavailable') return; dl = null; } if (dl) return; }
   const a = el('a', { href: URL.createObjectURL(new Blob([content], { type })), download: name });
   a.click(); URL.revokeObjectURL(a.href);
 }
@@ -710,9 +737,147 @@ async function copyYesterday() {
   listMsg(`✔ Copiada a lista de ${prev.split('-').reverse().join('/')}. Cole só as mudanças de hoje.`); render();
 }
 
+// ---- Pedidos a vender: comprados (ou marca própria) que ainda precisam ser lançados como venda no sistema da empresa
+const CP_KEY = 'precos-cliente-v1', ST_KEY = 'etapas-v1';
+let cprices = {}, stages = {};
+try { cprices = JSON.parse(localStorage.getItem(CP_KEY)) || {}; } catch {}
+try { stages = JSON.parse(localStorage.getItem(ST_KEY)) || {}; } catch {}
+const saveCP = () => { try { localStorage.setItem(CP_KEY, JSON.stringify(cprices)); } catch {} };
+const saveST = () => { try { localStorage.setItem(ST_KEY, JSON.stringify(stages)); } catch {} };
+const ckey = (c, item) => key(c) + '|' + key(item);
+const clientPrice = (c, item) => cprices[ckey(c, item)]?.price ?? null;
+const rememberPrice = (c, item, price) => { cprices[ckey(c, item)] = { client: c, item, price }; saveCP(); };
+const STAGES = ['Aguardando chegada', 'Chegou', 'Separado', 'Embalado'];
+const ddmm = d => d.split('-').reverse().join('/');
+const deliverOf = l => isOwn(l) ? l.qty : (l.got ?? l.qty);           // quantidade que realmente vai ao cliente
+const gTotal = g => g.lines.reduce((a, l) => a + deliverOf(l) * (l.price ?? 0), 0);
+const gUnits = g => g.lines.reduce((a, l) => a + deliverOf(l), 0);
+const gMissing = g => g.lines.filter(l => deliverOf(l) > 0 && l.price == null).length;
+function groupLines(ls) {
+  const m = new Map();
+  ls.forEach(l => { const k = l.client + '|' + l.date; if (!m.has(k)) m.set(k, { key: k, client: l.client, date: l.date, lines: [], at: 0 }); const g = m.get(k); g.lines.push(l); g.at = Math.max(g.at, l.soldAt || 0); });
+  return [...m.values()];
+}
+const salesGroups = () => groupLines(lines.filter(l => !l.sold && (l.bought || isOwn(l)))).sort((a, b) => a.date.localeCompare(b.date) || a.client.localeCompare(b.client));
+
+async function editPrice(l) {
+  const item = l.model || l.product;
+  const v = await askText(`Preço de ${item} para ${l.client}.\nVale para o modelo todo deste cliente nos pedidos ainda não lançados:`, l.price != null ? String(l.price).replace('.', ',') : '');
+  const pr = v == null ? null : money(v);
+  if (pr == null) return;
+  const mk = key(item);
+  lines.forEach(x => { if (!x.sold && x.client === l.client && key(x.model || x.product) === mk) x.price = pr; });
+  rememberPrice(l.client, item, pr); save(); render();
+}
+async function markSold(g) {
+  if (!await askConfirm(`Marcar o pedido de ${g.client} (${ddmm(g.date)}) como lançado no sistema da empresa?`, 'Lançado')) return;
+  g.lines.forEach(l => { l.sold = true; l.soldAt = Date.now(); }); delete stages[g.key]; saveST(); save(); render();
+}
+function launchText(g) {
+  const out = [`${g.client} — pedido de ${ddmm(g.date)}`, ''];
+  g.lines.forEach(l => { const d = deliverOf(l); if (d > 0) out.push(`${d}x ${l.product} — ${l.price != null ? brl(l.price) : 'SEM PREÇO'} = ${l.price != null ? brl(d * l.price) : '—'}`); });
+  return out.concat('', `TOTAL: ${brl(gTotal(g))}`).join('\n');
+}
+function launchCsv(gs) {
+  const rows = [['Cliente', 'Data do pedido', 'Produto', 'Qtd pedida', 'Qtd a entregar', 'Preço', 'Subtotal']];
+  gs.forEach(g => g.lines.forEach(l => { const d = deliverOf(l), c = n => String(n).replace('.', ',');
+    rows.push([g.client, ddmm(g.date), l.product, String(l.qty), String(d), l.price != null ? c(l.price.toFixed(2)) : '', l.price != null ? c((d * l.price).toFixed(2)) : '']); }));
+  return '﻿' + rows.map(r => r.map(csvCell).join(';')).join('\n');
+}
+
+// ---- Impressão / arquivo para a separação
+const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const SEP_CSS = `.sep{font-family:Arial,sans-serif;color:#000;background:#fff;padding:8px;page-break-after:always}.sep:last-child{page-break-after:auto}
+.sep h1{font-size:20px;margin:0 0 6px}.sep .meta{margin-bottom:10px;font-size:14px}.sep table{width:100%;border-collapse:collapse;font-size:14px}
+.sep th,.sep td{border:1px solid #444;padding:5px 7px;text-align:left}.sep td.q{font-size:18px;font-weight:700;text-align:center;width:60px}.sep td.c{width:30px;text-align:center}
+.sep td.r{text-align:right;white-space:nowrap}.sep tr.m td{background:#ddd;font-weight:700}.sep tr.short td{font-weight:700;border:2px solid #000}
+.sep .tot{margin-top:10px;font-weight:700}.sep .sign{margin-top:28px;display:flex;gap:40px}.sep .sign span{flex:1;border-top:1px solid #000;padding-top:4px;font-size:12px}`;
+document.head.append(el('style', { textContent: SEP_CSS + `#printArea{display:none}@media print{body.printing>*:not(#printArea){display:none!important}body.printing #printArea{display:block}body.printing{background:#fff}}` }));
+document.body.append(el('div', { id: 'printArea' }));
+function sepHtml(g, withPrice) {
+  const by = new Map(); g.lines.forEach(l => { const m = l.model || ''; if (!by.has(m)) by.set(m, []); by.get(m).push(l); });
+  const cols = withPrice ? 5 : 4, total = gUnits(g);
+  const rows = [...by].map(([m, ls]) => (m ? `<tr class="m"><td colspan="${cols}">${esc(m)}</td></tr>` : '') + ls.map(l => {
+    const d = deliverOf(l);
+    const obs = d === 0 ? `NÃO ENVIAR — sem estoque (pediu ${l.qty})` : d < l.qty ? `ATENÇÃO: pediu ${l.qty}, enviar ${d} (faltam ${l.qty - d})` : (isOwn(l) ? 'estoque próprio' : '');
+    return `<tr${d < l.qty ? ' class="short"' : ''}><td class="c">☐</td><td class="q">${d}</td><td>${esc(l.model ? (l.flavor || l.product) : l.product)}</td>`
+      + (withPrice ? `<td class="r">${l.price != null ? brl(l.price) : ''}</td>` : '') + `<td>${esc(obs)}</td></tr>`;
+  }).join('')).join('');
+  return `<section class="sep"><h1>SEPARAÇÃO DE PEDIDO</h1><div class="meta"><b>Cliente:</b> ${esc(g.client)} &nbsp;&nbsp; <b>Pedido de:</b> ${ddmm(g.date)} &nbsp;&nbsp; <b>Impresso em:</b> ${new Date().toLocaleString('pt-BR')}</div>`
+    + `<table><thead><tr><th>✓</th><th>Qtd</th><th>Produto</th>${withPrice ? '<th>Preço</th>' : ''}<th>Observação</th></tr></thead><tbody>${rows}</tbody></table>`
+    + `<div class="tot">Total de peças a separar: ${total}${withPrice ? ` &nbsp;|&nbsp; Total: ${brl(gTotal(g))}` : ''}</div>`
+    + `<div class="sign"><span>Separado por</span><span>Conferido por</span><span>Embalado por</span></div></section>`;
+}
+function printGroups(gs) {
+  if (!gs.length) return;
+  $('printArea').innerHTML = gs.map(g => sepHtml(g, $('printPrices').checked)).join('');
+  document.body.classList.add('printing');
+  addEventListener('afterprint', () => document.body.classList.remove('printing'), { once: true });
+  try { window.print(); } catch {}
+}
+const sepFile = (gs, withP) => `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Separação</title><style>${SEP_CSS}</style></head><body>${gs.map(g => sepHtml(g, withP)).join('')}</body></html>`;
+const safeName = t => t.replace(/[^\w\-]+/g, '_');
+const downloadSep = gs => gs.length && download(gs.length === 1 ? `separacao-${safeName(gs[0].client)}-${gs[0].date}.html` : `separacao-todos-${iso(new Date())}.html`, sepFile(gs, $('printPrices').checked), 'text/html');
+
+function salesCard(g) {
+  const miss = gMissing(g), st = stages[g.key] || STAGES[0];
+  const waiting = lines.filter(x => x.client === g.client && x.date === g.date && !isOwn(x) && !x.bought && !x.sold).length;   // itens do mesmo pedido que ainda não foram comprados
+  const sel = el('select', { style: 'width:auto;flex:0 0 auto', title: 'Etapa do pedido', onchange: e => { stages[g.key] = e.target.value; saveST(); } },
+    ...STAGES.map(x => el('option', { value: x, textContent: x, selected: x === st })));
+  return el('div', { className: 'card' },
+    el('div', { className: 'row', style: 'align-items:center;margin-bottom:8px' },
+      el('h2', { style: 'margin:0;flex:1 1 220px' }, `${g.client} — pedido de ${ddmm(g.date)} `, waiting ? el('span', { className: 'tag warn', textContent: `⏳ ${waiting} item(ns) ainda sem compra` }) : ''), sel),
+    el('table', {},
+      el('tr', {}, el('th', { className: 'n', textContent: 'Entregar' }), el('th', { textContent: 'Produto' }), el('th', { className: 'n', textContent: 'Preço' }), el('th', { className: 'n', textContent: 'Subtotal' })),
+      ...g.lines.map(l => { const d = deliverOf(l);
+        return el('tr', {},
+          el('td', { className: 'n', style: 'font-weight:700', textContent: d }),
+          el('td', {}, l.product + ' ',
+            isOwn(l) ? el('span', { className: 'tag', textContent: 'própria' }) : '',
+            d < l.qty ? el('span', { className: 'tag warn', textContent: d === 0 ? `⚠ não vai (pediu ${l.qty})` : `⚠ pediu ${l.qty}, faltam ${l.qty - d}` }) : ''),
+          el('td', { className: 'n' }, el('button', { className: l.price == null ? 'pri' : 'x', textContent: l.price != null ? brl(l.price) : '＋ preço', onclick: () => editPrice(l) })),
+          el('td', { className: 'n', textContent: l.price != null ? brl(d * l.price) : '—' })); })),
+    el('div', { className: 'row', style: 'align-items:center;margin-top:10px' },
+      el('div', { style: 'flex:1 1 200px' }, el('span', { className: 'mut', textContent: `${gUnits(g)} peças · total a lançar: ` }), el('b', { textContent: brl(gTotal(g)) }),
+        miss ? el('span', { className: 'tag warn', textContent: `${miss} sem preço` }) : ''),
+      el('button', { style: 'flex:0 0 auto', textContent: '🖨 Imprimir', onclick: () => printGroups([g]) }),
+      el('button', { style: 'flex:0 0 auto', textContent: '⬇ Baixar', title: 'Baixar a separação para imprimir do arquivo', onclick: () => downloadSep([g]) }),
+      el('button', { style: 'flex:0 0 auto', textContent: '📋 Copiar para lançar', onclick: e => copyText(launchText(g), e.target, '📋 Copiar para lançar') }),
+      el('button', { className: 'ok', style: 'flex:0 0 auto', textContent: '✔ Lançado no sistema', onclick: () => markSold(g) })));
+}
+function renderSales() {
+  const gs = salesGroups();
+  $('salesSummary').textContent = gs.length ? `${gs.length} pedido(s) · ${gs.reduce((a, g) => a + gUnits(g), 0)} peças · ${brl(gs.reduce((a, g) => a + gTotal(g), 0))}` : 'Nenhum pedido pendente de venda';
+  $('salesList').replaceChildren(...(gs.length ? gs.map(salesCard) : [el('div', { className: 'card empty', textContent: 'Quando você marcar uma compra como comprada, os pedidos aparecem aqui com as quantidades que realmente vão ao cliente.' })]));
+  const sold = groupLines(lines.filter(l => l.sold)).sort((a, b) => b.at - a.at).slice(0, 30);
+  $('soldN').textContent = sold.length;
+  $('soldList').replaceChildren(...(sold.length ? [el('table', {}, ...sold.map(g => el('tr', {},
+    el('td', { textContent: `${g.client} — ${ddmm(g.date)}` }), el('td', { className: 'n mut', textContent: brl(gTotal(g)) }),
+    el('td', { className: 'n' }, el('button', { className: 'x', textContent: '↩ Reabrir', onclick: () => { g.lines.forEach(l => { l.sold = false; }); save(); render(); } })))))]
+    : [el('div', { className: 'empty', textContent: 'Nenhum ainda.' })]));
+  const byC = {}; Object.entries(cprices).forEach(([k, v]) => (byC[v.client] ||= []).push([k, v]));
+  $('cpList').replaceChildren(...(Object.keys(byC).length ? Object.keys(byC).sort().map(c => el('div', {}, el('div', { className: 'sup', textContent: c }),
+    el('table', {}, ...byC[c].sort((a, b) => a[1].item.localeCompare(b[1].item)).map(([k, v]) => el('tr', {},
+      el('td', { textContent: v.item }), el('td', { className: 'n', textContent: brl(v.price) }),
+      el('td', { className: 'n' },
+        el('button', { className: 'x', textContent: '✎', onclick: async () => { const x = money(await askText(`Preço de ${v.item} para ${c}:`, String(v.price).replace('.', ','))); if (x != null) { setClientPrice(c, v.item, x); } } }),
+        el('button', { className: 'x', textContent: '✕', onclick: () => { delete cprices[k]; saveCP(); render(); } }))))))) : [el('div', { className: 'empty', textContent: 'Ainda não há preços guardados.' })]));
+}
+function setClientPrice(c, item, price) {
+  rememberPrice(c, item, price);
+  lines.forEach(x => { if (!x.sold && x.client === c && key(x.model || x.product) === key(item)) x.price = price; });
+  save(); render();
+}
+async function addClientPrice() {
+  const c = norm(await askText('Cliente (nome igual ao dos pedidos):', '') || ''); if (!c) return;
+  const item = norm(await askText('Modelo (ex.: NICKBAR 10K):', '') || ''); if (!item) return;
+  const pr = money(await askText(`Preço de ${item} para ${c}:`, '')); if (pr == null) return;
+  setClientPrice(c, item, pr);
+}
+
 // ---- navegação
 function tab(which) {
-  ['orders', 'buy', 'list'].forEach(t => {
+  ['orders', 'buy', 'list', 'sales'].forEach(t => {
     $('view-' + t).classList.toggle('hide', which !== t);
     $('tab-' + t).classList.toggle('on', which === t);
   });
@@ -722,6 +887,11 @@ function shift(n) { const d = new Date(day() + 'T12:00'); d.setDate(d.getDate() 
 $('tab-orders').onclick = () => tab('orders');
 $('tab-buy').onclick = () => tab('buy');
 $('tab-list').onclick = () => tab('list');
+$('tab-sales').onclick = () => tab('sales');
+$('salesPrintAll').onclick = () => printGroups(salesGroups());
+$('salesDlAll').onclick = () => downloadSep(salesGroups());
+$('salesCsv').onclick = () => download(`vendas-a-lancar-${iso(new Date())}.csv`, launchCsv(salesGroups()), 'text/csv');
+$('cpAdd').onclick = addClientPrice;
 try { $('listHead').value = localStorage.getItem(HEAD_KEY) || HEAD_DEFAULT; } catch { $('listHead').value = HEAD_DEFAULT; }
 $('listHead').onchange = e => { try { localStorage.setItem(HEAD_KEY, e.target.value); } catch {} };
 $('listMerge').onclick = () => submitList('models');
@@ -752,14 +922,14 @@ $('date').onchange = render;
 $('prev').onclick = () => shift(-1);
 $('next').onclick = () => shift(1);
 $('today').onclick = () => { $('date').value = iso(new Date()); render(); };
-$('exp').onclick = () => download(`backup-pedidos-${iso(new Date())}.json`, JSON.stringify({ v: 2, lines, listas }), 'application/json');
+$('exp').onclick = () => download(`backup-pedidos-${iso(new Date())}.json`, JSON.stringify({ v: 3, lines, listas, cprices, stages }), 'application/json');
 $('imp').onclick = () => $('file').click();
 $('file').onchange = async e => {
   try {
     const data = JSON.parse(await e.target.files[0].text());
     const ls = Array.isArray(data) ? data : data.lines;
     if (!Array.isArray(ls)) throw 0;
-    if (await askConfirm('Isso substitui todos os dados atuais. Continuar?', 'Restaurar')) { lines = ls; if (data.listas) { listas = data.listas; saveListas(); } save(); render(); }
+    if (await askConfirm('Isso substitui todos os dados atuais. Continuar?', 'Restaurar')) { lines = ls; if (data.listas) { listas = data.listas; saveListas(); } if (data.cprices) { cprices = data.cprices; saveCP(); } if (data.stages) { stages = data.stages; saveST(); } save(); render(); }
   } catch { await dialog('Arquivo de backup inválido.', { single: true }); }
   e.target.value = '';
 };
