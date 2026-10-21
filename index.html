@@ -60,6 +60,7 @@
   <div class="tabs">
     <button id="tab-orders" class="on">1. Pedidos recebidos</button>
     <button id="tab-buy">2. Compra consolidada</button>
+    <button id="tab-list">3. Lista do dia</button>
   </div>
 
   <!-- ABA PEDIDOS -->
@@ -117,6 +118,28 @@
     <div class="card" id="ownCard" style="display:none">
       <h2>Marca própria (separar do estoque)</h2>
       <div id="ownList"></div>
+    </div>
+  </section>
+
+  <!-- ABA LISTA DO DIA -->
+  <section id="view-list" class="hide">
+    <div class="card">
+      <h2>Atualizar a lista</h2>
+      <label>Cole a lista nova ou só a atualização. Cabeçalho de modelo com preço ou terminado em “:” e os sabores embaixo (um por linha, com ou sem “-”); ou linhas da planilha (modelo, sabor, qtd, preço). Sabor com “esgotado” ou qtd 0 sai da lista.</label>
+      <textarea id="listText" placeholder="NICKBAR 10K $5,75&#10;- Grape Ice&#10;- Miami Mint (20 un.)&#10;- Strawberry Ice esgotado&#10;&#10;ELFBAR BC 15K:&#10;- Ice Mint"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="pri" id="listMerge">Atualizar lista (soma ao que já tem)</button>
+        <button id="listReplace">Substituir a lista inteira</button>
+        <button id="listYest">Copiar lista de ontem</button>
+      </div>
+      <div class="mut" id="listMsg" style="margin-top:6px"></div>
+    </div>
+    <div class="card">
+      <div class="row" style="align-items:center">
+        <h2 style="margin:0" id="listTitle">Lista do dia</h2>
+        <button class="ok" id="listCopy" style="flex:0 0 auto">📋 Copiar lista completa</button>
+      </div>
+      <div id="listView"></div>
     </div>
   </section>
 
@@ -301,6 +324,7 @@ function render() {
   renderOrders(ls);
   renderBuy(ls);
   renderShort(ls);
+  renderList();
   $('clients').replaceChildren(...[...new Set(lines.map(l => l.client))].map(v => el('option', { value: v })));
   $('suppliers').replaceChildren(...[...new Set(rules.map(r => r.sup))].map(v => el('option', { value: v })));
 }
@@ -487,17 +511,128 @@ function markDone() {
   save(); render();
 }
 
+// ---- Lista do dia (o que está disponível para os clientes), uma por data
+const LIST_KEY = 'listas-v1';
+let listas = {}; try { listas = JSON.parse(localStorage.getItem(LIST_KEY)) || {}; } catch {}
+const saveListas = () => { try { localStorage.setItem(LIST_KEY, JSON.stringify(listas)); } catch {} };
+const curList = () => listas[day()] ||= [];
+const BULLET = /^[\s\-–•*·▪►>]+/;
+const GONE = /\b(esgotad[oa]|zerad[oa]|sem estoque|acabou|indispon[ií]vel)\b/i;
+const PRICE = /\$\s*\d[\d.,]*/;
+function flavorOps(text, model, price) {                  // "Grape Ice (20 un.)" -> {flavor, qty, remove}
+  let t = text.replace(BULLET, ''), remove = GONE.test(t), qty = null, m;
+  t = t.replace(GONE, '');
+  const pm = t.match(PRICE); if (pm) { price = money(pm[0]); t = t.replace(PRICE, ''); }
+  if ((m = t.match(/[\(\[]\s*(\d+)\s*(?:un|und|pcs|pç|pecas|peças)?\.?\s*[\)\]]\s*$/i)) || (m = t.match(/[-–:]\s*(\d+)\s*(?:un|und|pcs|pç|pecas|peças)\.?\s*$/i)) || (m = t.match(/\bx\s*(\d+)\s*$/i)) || (m = t.match(/\s(0)\s*$/))) {
+    qty = +m[1]; t = t.slice(0, m.index);
+  }
+  const flavor = norm(t.replace(/[\s\-–:,]+$/, ''));
+  return flavor ? { model, flavor, qty, price, remove: remove || qty === 0 } : null;
+}
+function parseList(text) {
+  const ops = []; let model = '', price = null, prev = '';
+  for (const raw of text.split('\n')) {
+    if (!raw.trim()) { prev = ''; continue; }
+    if (raw.includes('\t')) {                              // linha de planilha
+      const c = raw.split('\t').map(norm); if (c[0]) model = c[0];
+      if (!c[1] || /^sabor$/i.test(c[1])) continue;
+      let qty = null, pr = null;
+      c.slice(2).forEach(x => { if (/^\$|\d[.,]\d{1,2}$/.test(x)) pr ??= money(x); else if (/^\d+$/.test(x)) qty ??= +x; });
+      ops.push({ model, flavor: c[1], qty, price: pr, remove: qty === 0 }); continue;
+    }
+    const bullet = BULLET.test(raw) && /\S/.test(raw.replace(BULLET, ''));
+    const t = raw.replace(BULLET, '').trim(), hasPrice = PRICE.test(t);
+    const isHeader = !bullet && (hasPrice || /:\s*$/.test(t) || !model || supplierFor(t) || ownRules.some(r => r.every(k => tokens(t).includes(k))));
+    if (isHeader) {
+      const pm = t.match(PRICE); price = pm ? money(pm[0]) : null;
+      model = norm(t.replace(PRICE, '').replace(/[\s\-–:]+$/, ''));
+      if (price != null) ops.push({ model, header: true, price }); continue;
+    }
+    const o = flavorOps(t, model, price); if (o) ops.push(o);
+  }
+  return ops;
+}
+function applyList(ops, replace) {
+  const l = replace ? [] : curList(), k = o => key(o.model + ' ' + o.flavor);
+  ops.forEach(o => {
+    if (o.header) { l.forEach(x => { if (x.model === o.model) x.price = o.price; }); return; }   // preço novo vale p/ o modelo todo
+    const i = l.findIndex(x => k(x) === k(o));
+    if (o.remove) { if (i >= 0) l.splice(i, 1); return; }
+    const price = o.price ?? (i >= 0 ? l[i].price : null) ?? l.find(x => x.model === o.model && x.price != null)?.price ?? priceFor(o.model);
+    if (i >= 0) l[i] = { ...l[i], price, qty: o.qty ?? l[i].qty };
+    else l.push({ model: o.model, flavor: o.flavor, qty: o.qty, price });
+  });
+  listas[day()] = l; saveListas();
+}
+function listGroups() {
+  const m = new Map(); curList().forEach(x => { if (!m.has(x.model)) m.set(x.model, []); m.get(x.model).push(x); });
+  return [...m];
+}
+function listText() {
+  const [d, mo] = day().split('-').reverse(), out = [`*LISTA DO DIA ${d}/${mo}*`];
+  listGroups().forEach(([model, items]) => {
+    const uni = items.every(x => x.price === items[0].price) ? items[0].price : undefined;
+    out.push('');
+    if (model) out.push(`*${model}*` + (uni != null ? ` — ${brl(uni)}` : ''));
+    items.forEach(x => out.push(`• ${x.flavor}` + (x.qty != null ? ` (${x.qty} un.)` : '') + (uni === undefined && x.price != null ? ` — ${brl(x.price)}` : '')));
+  });
+  return out.join('\n');
+}
+function renderList() {
+  const g = listGroups(), n = curList().length;
+  $('listTitle').textContent = `Lista de ${day().split('-').reverse().join('/')} (${n} sabores)`;
+  $('listView').replaceChildren(...(g.length ? g.map(([model, items]) => {
+    const uni = items.every(x => x.price === items[0].price) ? items[0].price : undefined;
+    return el('div', {}, el('div', { className: 'sup' }, model || 'Sem modelo',
+      el('span', { className: 'mut', textContent: uni != null ? ` — ${brl(uni)}` : '' }),
+      model ? el('button', { className: 'x', textContent: '✎ preço', onclick: () => {
+        const v = money(prompt(`Preço de ${model} (para todos os sabores):`, uni ?? ''));
+        if (v != null) { items.forEach(x => x.price = v); saveListas(); render(); } } }) : ''),
+      el('table', {}, ...items.map(x => el('tr', {},
+        el('td', { textContent: x.flavor }),
+        el('td', { className: 'n mut', textContent: x.qty != null ? x.qty + ' un.' : '' }),
+        el('td', { className: 'n' },
+          el('button', { className: 'x', textContent: '✎', title: 'Quantidade disponível', onclick: () => {
+            const v = prompt(`Quantidade de "${x.flavor}" (vazio = sem limite):`, x.qty ?? '');
+            if (v != null) { x.qty = v.trim() === '' ? null : Math.max(0, parseInt(v, 10) || 0); saveListas(); render(); } } }),
+          el('button', { className: 'x', textContent: '✕', title: 'Tirar da lista (esgotou)', onclick: () => { curList().splice(curList().indexOf(x), 1); saveListas(); render(); } }))))));
+  }) : [el('div', { className: 'empty', textContent: 'Lista vazia. Cole a lista do dia acima.' })]));
+}
+function listMsg(t) { $('listMsg').textContent = t; }
+function submitList(replace) {
+  const ops = parseList($('listText').value);
+  if (!ops.some(o => !o.header)) return listMsg('Não encontrei sabores no texto colado.');
+  if (replace && curList().length && !confirm('Substituir a lista inteira de hoje?')) return;
+  const before = curList().length;
+  applyList(ops, replace);
+  $('listText').value = '';
+  listMsg(`✔ Lista atualizada: ${before} → ${curList().length} sabores.`);
+  render();
+}
+function copyYesterday() {
+  const prev = Object.keys(listas).filter(d => d < day() && listas[d].length).sort().pop();
+  if (!prev) return listMsg('Não há lista de dias anteriores.');
+  if (curList().length && !confirm('Já existe lista hoje. Substituir pela de ' + prev.split('-').reverse().join('/') + '?')) return;
+  listas[day()] = JSON.parse(JSON.stringify(listas[prev])); saveListas();
+  listMsg(`✔ Copiada a lista de ${prev.split('-').reverse().join('/')}. Cole só as mudanças de hoje.`); render();
+}
+
 // ---- navegação
 function tab(which) {
-  $('view-orders').classList.toggle('hide', which !== 'orders');
-  $('view-buy').classList.toggle('hide', which !== 'buy');
-  $('tab-orders').classList.toggle('on', which === 'orders');
-  $('tab-buy').classList.toggle('on', which === 'buy');
+  ['orders', 'buy', 'list'].forEach(t => {
+    $('view-' + t).classList.toggle('hide', which !== t);
+    $('tab-' + t).classList.toggle('on', which === t);
+  });
 }
 function shift(n) { const d = new Date(day() + 'T12:00'); d.setDate(d.getDate() + n); $('date').value = iso(d); render(); }
 
 $('tab-orders').onclick = () => tab('orders');
 $('tab-buy').onclick = () => tab('buy');
+$('tab-list').onclick = () => tab('list');
+$('listMerge').onclick = () => submitList(false);
+$('listReplace').onclick = () => submitList(true);
+$('listYest').onclick = copyYesterday;
+$('listCopy').onclick = e => copyText(listText(), e.target, '📋 Copiar lista completa');
 $('supText').value = loadSup();
 $('ownText').value = loadOwn();
 $('supSave').onclick = () => {
@@ -515,13 +650,14 @@ $('date').onchange = render;
 $('prev').onclick = () => shift(-1);
 $('next').onclick = () => shift(1);
 $('today').onclick = () => { $('date').value = iso(new Date()); render(); };
-$('exp').onclick = () => download(`backup-pedidos-${iso(new Date())}.json`, JSON.stringify(lines), 'application/json');
+$('exp').onclick = () => download(`backup-pedidos-${iso(new Date())}.json`, JSON.stringify({ v: 2, lines, listas }), 'application/json');
 $('imp').onclick = () => $('file').click();
 $('file').onchange = async e => {
   try {
     const data = JSON.parse(await e.target.files[0].text());
-    if (!Array.isArray(data)) throw 0;
-    if (confirm('Isso substitui todos os dados atuais. Continuar?')) { lines = data; save(); render(); }
+    const ls = Array.isArray(data) ? data : data.lines;
+    if (!Array.isArray(ls)) throw 0;
+    if (confirm('Isso substitui todos os dados atuais. Continuar?')) { lines = ls; if (data.listas) { listas = data.listas; saveListas(); } save(); render(); }
   } catch { alert('Arquivo de backup inválido.'); }
   e.target.value = '';
 };
