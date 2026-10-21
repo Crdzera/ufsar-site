@@ -128,11 +128,13 @@
       <label>Cole a lista nova ou só a atualização. Aceita o seu formato (marca entre linhas ━━━, modelo “— $ 11,20” ou “— consultar”, sabores embaixo, “— últimas 100 un”) e também linhas da planilha. Para tirar um sabor, escreva “esgotado” ao lado dele ou qtd 0.</label>
       <textarea id="listText" placeholder="NICKBAR 10K $5,75&#10;- Grape Ice&#10;- Miami Mint (20 un.)&#10;- Strawberry Ice esgotado&#10;&#10;ELFBAR BC 15K:&#10;- Ice Mint"></textarea>
       <div class="row" style="margin-top:8px">
-        <button class="pri" id="listMerge">Atualizar lista (soma ao que já tem)</button>
-        <button id="listReplace">Substituir a lista inteira</button>
+        <button class="pri" id="listMerge">Atualizar lista</button>
+        <button id="listAdd">Só acrescentar / ajustar</button>
+        <button id="listReplace">Substituir tudo</button>
         <button id="listYest">Copiar lista de ontem</button>
       </div>
       <div class="mut" id="listMsg" style="margin-top:6px"></div>
+      <div class="mut" style="margin-top:6px"><b>Atualizar lista:</b> cada modelo que você colar vira a versão nova dele (sabor que sumiu sai da lista); modelos que você não colar ficam como estão. Sabor sem nada ao lado = disponível. Se um modelo tiver “esgotado”, o sistema só tira aquele sabor e não mexe nos outros. <b>Só acrescentar:</b> nunca apaga nada por omissão. <b>Substituir tudo:</b> apaga a lista do dia e usa só o que você colou.</div>
     </div>
     <div class="card">
       <div class="row" style="align-items:center">
@@ -571,19 +573,45 @@ function parseList(text) {
   }
   return ops;
 }
-function applyList(ops, replace) {
-  const l = replace ? [] : curList(), k = o => key(o.model + ' ' + o.flavor);
-  ops.forEach(o => {
-    if (o.header) { l.forEach(x => { if (x.model === o.model) { x.price = o.price; x.consult = o.consult; } }); return; }   // preço novo vale p/ o modelo todo
+// modo 'models' (padrão): cada modelo colado vira a versão nova (sabor que sumiu sai; modelos não colados ficam);
+//   exceção: modelo com "esgotado" é tratado como ajuste parcial e não apaga os outros sabores.
+// modo 'all': substitui a lista inteira. modo 'add': só acrescenta/ajusta, nunca apaga por omissão.
+// Sabor listado sem quantidade = disponível (apaga qualquer quantidade antiga).
+function applyList(ops, mode) {
+  const old = curList(), k = o => key(o.model + ' ' + o.flavor), flav = ops.filter(o => !o.header);
+  const prev = new Map(); old.forEach(x => { if (!prev.has(x.model)) prev.set(x.model, x); });
+  const mk = (o, sib) => {
+    const price = o.price ?? sib?.price ?? ((o.consult || sib?.consult) ? null : priceFor(o.model));
+    return { brand: o.brand, model: o.model, label: o.label || o.model, flavor: o.flavor, qty: o.qty, last: o.last, price, consult: price == null && !!(o.consult || sib?.consult) };
+  };
+  const addOps = (l, list) => list.forEach(o => {
+    if (o.header) { l.forEach(x => { if (x.model === o.model) { x.price = o.price; x.consult = o.consult; } }); return; }
     const i = l.findIndex(x => k(x) === k(o));
     if (o.remove) { if (i >= 0) l.splice(i, 1); return; }
-    const sib = l.find(x => x.model === o.model);
-    const price = o.price ?? (i >= 0 ? l[i].price : null) ?? sib?.price ?? ((o.consult || sib?.consult) ? null : priceFor(o.model));
-    const consult = price == null && !!(o.consult || (i >= 0 && l[i].consult) || sib?.consult);
-    if (i >= 0) l[i] = { ...l[i], price, consult, qty: o.qty ?? l[i].qty, last: o.qty != null ? o.last : l[i].last };
-    else l.push({ brand: o.brand, model: o.model, label: o.label || o.model, flavor: o.flavor, qty: o.qty, last: o.last, price, consult });
+    const it = mk(o, l.find(x => x.model === o.model));
+    if (i >= 0) l[i] = { ...l[i], ...it }; else l.push(it);
   });
+  let l;
+  if (mode === 'add') { l = old.slice(); addOps(l, ops); }
+  else {
+    const partial = new Set(flav.filter(o => o.remove).map(o => o.model));
+    const nm = new Map();
+    flav.filter(o => !o.remove && !partial.has(o.model)).forEach(o => {
+      const a = nm.get(o.model) || nm.set(o.model, []).get(o.model);
+      const it = mk(o, mode === 'all' ? null : prev.get(o.model)), j = a.findIndex(x => key(x.flavor) === key(o.flavor));
+      if (j >= 0) a[j] = it; else a.push(it);
+    });
+    l = []; const done = new Set();
+    (mode === 'all' ? [] : old).forEach(x => {
+      if (!nm.has(x.model)) l.push(x);
+      else if (!done.has(x.model)) { done.add(x.model); l.push(...nm.get(x.model)); }
+    });
+    nm.forEach((a, m) => { if (!done.has(m)) l.push(...a); });
+    addOps(l, ops.filter(o => partial.has(o.model)));
+  }
+  const oldK = new Set(old.map(k)), newK = new Set(l.map(k));
   listas[day()] = l; saveListas();
+  return { added: l.filter(x => !oldK.has(k(x))).length, removed: old.filter(x => !newK.has(k(x))).length };
 }
 function listGroups() {
   const m = new Map(); curList().forEach(x => { if (!m.has(x.model)) m.set(x.model, []); m.get(x.model).push(x); });
@@ -629,14 +657,13 @@ function renderList() {
   }) : [el('div', { className: 'empty', textContent: 'Lista vazia. Cole a lista do dia acima.' })]));
 }
 function listMsg(t) { $('listMsg').textContent = t; }
-function submitList(replace) {
+function submitList(mode) {
   const ops = parseList($('listText').value);
   if (!ops.some(o => !o.header)) return listMsg('Não encontrei sabores no texto colado.');
-  if (replace && curList().length && !confirm('Substituir a lista inteira de hoje?')) return;
-  const before = curList().length;
-  applyList(ops, replace);
+  if (mode === 'all' && curList().length && !confirm('Substituir a lista inteira de hoje?')) return;
+  const r = applyList(ops, mode);
   $('listText').value = '';
-  listMsg(`✔ Lista atualizada: ${before} → ${curList().length} sabores.`);
+  listMsg(`✔ Lista atualizada: ${curList().length} sabores (+${r.added} novos, −${r.removed} saíram).`);
   render();
 }
 function copyYesterday() {
@@ -659,8 +686,9 @@ function shift(n) { const d = new Date(day() + 'T12:00'); d.setDate(d.getDate() 
 $('tab-orders').onclick = () => tab('orders');
 $('tab-buy').onclick = () => tab('buy');
 $('tab-list').onclick = () => tab('list');
-$('listMerge').onclick = () => submitList(false);
-$('listReplace').onclick = () => submitList(true);
+$('listMerge').onclick = () => submitList('models');
+$('listAdd').onclick = () => submitList('add');
+$('listReplace').onclick = () => submitList('all');
 $('listYest').onclick = copyYesterday;
 $('listCopy').onclick = e => copyText(listText(), e.target, '📋 Copiar lista completa');
 $('supText').value = loadSup();
