@@ -157,9 +157,11 @@
         <button id="salesPrintAll" style="flex:0 0 auto">🖨 Imprimir todos</button>
         <button id="salesDlAll" style="flex:0 0 auto">⬇ Baixar todos (HTML)</button>
         <button id="salesCsv" style="flex:0 0 auto">⬇ CSV para lançar</button>
+        <button id="salesOpenAll" style="flex:0 0 auto">▾ Abrir todos</button>
+        <button id="salesCloseAll" style="flex:0 0 auto">▸ Recolher todos</button>
         <label style="display:flex;gap:6px;align-items:center;margin:0;flex:1 1 200px"><input type="checkbox" id="printPrices" style="width:auto"> Mostrar preços na impressão</label>
       </div>
-      <div class="mut" style="margin-top:6px">Entra aqui o que foi marcado como comprado, já com a quantidade que realmente vai ao cliente. A impressão é para separação (sem preços, a menos que você marque). Se a impressão não abrir, use “Baixar” e imprima o arquivo (Ctrl+P).</div>
+      <div class="mut" style="margin-top:6px">Clique no nome do cliente para abrir ou recolher o pedido. Entra aqui o que foi marcado como comprado, já com a quantidade que realmente vai ao cliente. A impressão é para separação (sem preços, a menos que você marque). Se a impressão não abrir, use “Baixar” e imprima o arquivo (Ctrl+P).</div>
     </div>
     <div id="salesList"></div>
     <div class="card"><details><summary>Já lançados no sistema (<span id="soldN">0</span>)</summary><div id="soldList"></div></details></div>
@@ -771,7 +773,7 @@ async function editPrice(l) {
 }
 async function markSold(g) {
   if (!await askConfirm(`Marcar o pedido de ${g.client} (${ddmm(g.date)}) como lançado no sistema da empresa?`, 'Lançado')) return;
-  g.lines.forEach(l => { l.sold = true; l.soldAt = Date.now(); }); delete stages[g.key]; saveST(); save(); render();
+  g.lines.forEach(l => { l.sold = true; l.soldAt = Date.now(); }); delete stages[g.key]; openSales.delete(g.key); saveST(); saveOpen(); save(); render();
 }
 function launchText(g) {
   const out = [`${g.client} — pedido de ${ddmm(g.date)}`, ''];
@@ -819,15 +821,23 @@ const sepFile = (gs, withP) => `<!doctype html><html lang="pt-BR"><head><meta ch
 const safeName = t => t.replace(/[^\w\-]+/g, '_');
 const downloadSep = gs => gs.length && download(gs.length === 1 ? `separacao-${safeName(gs[0].client)}-${gs[0].date}.html` : `separacao-todos-${iso(new Date())}.html`, sepFile(gs, $('printPrices').checked), 'text/html');
 
+// Pedidos recolhidos por padrão: clique no nome do cliente para abrir/fechar (lembra o que ficou aberto)
+let openSales = new Set(); try { openSales = new Set(JSON.parse(localStorage.getItem('abertos-v1')) || []); } catch {}
+const saveOpen = () => { try { localStorage.setItem('abertos-v1', JSON.stringify([...openSales])); } catch {} };
 function salesCard(g) {
-  const miss = gMissing(g), st = stages[g.key] || STAGES[0];
+  const miss = gMissing(g), st = stages[g.key] || STAGES[0], open = openSales.has(g.key);
   const waiting = lines.filter(x => x.client === g.client && x.date === g.date && !isOwn(x) && !x.bought && !x.sold).length;   // itens do mesmo pedido que ainda não foram comprados
-  const sel = el('select', { style: 'width:auto;flex:0 0 auto', title: 'Etapa do pedido', onchange: e => { stages[g.key] = e.target.value; saveST(); } },
+  const sel = el('select', { style: 'width:auto;flex:0 0 auto', title: 'Etapa do pedido', onclick: e => e.stopPropagation(), onchange: e => { stages[g.key] = e.target.value; saveST(); } },
     ...STAGES.map(x => el('option', { value: x, textContent: x, selected: x === st })));
-  return el('div', { className: 'card' },
-    el('div', { className: 'row', style: 'align-items:center;margin-bottom:8px' },
-      el('h2', { style: 'margin:0;flex:1 1 220px' }, `${g.client} — pedido de ${ddmm(g.date)} `, waiting ? el('span', { className: 'tag warn', textContent: `⏳ ${waiting} item(ns) ainda sem compra` }) : ''), sel),
-    el('table', {},
+  const toggle = () => { if (open) openSales.delete(g.key); else openSales.add(g.key); saveOpen(); renderSales(); };
+  const head = el('div', { className: 'row', style: 'align-items:center;cursor:pointer;user-select:none', title: open ? 'Clique para recolher' : 'Clique para abrir o pedido', onclick: toggle },
+    el('h2', { style: 'margin:0;flex:1 1 220px' }, `${open ? '▾' : '▸'} ${g.client} — pedido de ${ddmm(g.date)} `,
+      waiting ? el('span', { className: 'tag warn', textContent: `⏳ ${waiting} item(ns) ainda sem compra` }) : '',
+      miss ? el('span', { className: 'tag warn', textContent: `${miss} sem preço` }) : ''),
+    el('span', { className: 'mut', style: 'flex:0 0 auto', textContent: `${gUnits(g)} peças · ${brl(gTotal(g))}` }), sel);
+  if (!open) return el('div', { className: 'card', style: 'padding:10px 14px' }, head);
+  return el('div', { className: 'card' }, head,
+    el('table', { style: 'margin-top:8px' },
       el('tr', {}, el('th', { className: 'n', textContent: 'Entregar' }), el('th', { textContent: 'Produto' }), el('th', { className: 'n', textContent: 'Preço' }), el('th', { className: 'n', textContent: 'Subtotal' })),
       ...g.lines.map(l => { const d = deliverOf(l);
         return el('tr', {},
@@ -838,8 +848,7 @@ function salesCard(g) {
           el('td', { className: 'n' }, el('button', { className: l.price == null ? 'pri' : 'x', textContent: l.price != null ? brl(l.price) : '＋ preço', onclick: () => editPrice(l) })),
           el('td', { className: 'n', textContent: l.price != null ? brl(d * l.price) : '—' })); })),
     el('div', { className: 'row', style: 'align-items:center;margin-top:10px' },
-      el('div', { style: 'flex:1 1 200px' }, el('span', { className: 'mut', textContent: `${gUnits(g)} peças · total a lançar: ` }), el('b', { textContent: brl(gTotal(g)) }),
-        miss ? el('span', { className: 'tag warn', textContent: `${miss} sem preço` }) : ''),
+      el('div', { style: 'flex:1 1 200px' }, el('span', { className: 'mut', textContent: `${gUnits(g)} peças · total a lançar: ` }), el('b', { textContent: brl(gTotal(g)) })),
       el('button', { style: 'flex:0 0 auto', textContent: '🖨 Imprimir', onclick: () => printGroups([g]) }),
       el('button', { style: 'flex:0 0 auto', textContent: '⬇ Baixar', title: 'Baixar a separação para imprimir do arquivo', onclick: () => downloadSep([g]) }),
       el('button', { style: 'flex:0 0 auto', textContent: '📋 Copiar para lançar', onclick: e => copyText(launchText(g), e.target, '📋 Copiar para lançar') }),
@@ -892,6 +901,8 @@ $('salesPrintAll').onclick = () => printGroups(salesGroups());
 $('salesDlAll').onclick = () => downloadSep(salesGroups());
 $('salesCsv').onclick = () => download(`vendas-a-lancar-${iso(new Date())}.csv`, launchCsv(salesGroups()), 'text/csv');
 $('cpAdd').onclick = addClientPrice;
+$('salesOpenAll').onclick = () => { salesGroups().forEach(g => openSales.add(g.key)); saveOpen(); renderSales(); };
+$('salesCloseAll').onclick = () => { openSales.clear(); saveOpen(); renderSales(); };
 try { $('listHead').value = localStorage.getItem(HEAD_KEY) || HEAD_DEFAULT; } catch { $('listHead').value = HEAD_DEFAULT; }
 $('listHead').onchange = e => { try { localStorage.setItem(HEAD_KEY, e.target.value); } catch {} };
 $('listMerge').onclick = () => submitList('models');
