@@ -62,6 +62,7 @@
     <button id="tab-buy">2. Compra consolidada</button>
     <button id="tab-list">3. Lista do dia</button>
     <button id="tab-sales">4. Pedidos a vender</button>
+    <button id="tab-pre">5. Pré-pedidos</button>
   </div>
 
   <!-- ABA PEDIDOS -->
@@ -172,6 +173,36 @@
     </details></div>
   </section>
 
+  <!-- ABA PRÉ-PEDIDOS -->
+  <section id="view-pre" class="hide">
+    <div class="card">
+      <h2>Novo pré-pedido</h2>
+      <div class="row">
+        <div><label>Cliente (deixe vazio se colar a conversa do WhatsApp com o nome)</label><input id="preClient" list="clients" placeholder="Nome do cliente" autocomplete="off"></div>
+      </div>
+      <div style="margin:10px 0 4px"><label>Cole a conversa do WhatsApp, as linhas da planilha ou um item por linha (<b>30x Elfbar TE 30K Peach</b>)</label>
+        <textarea id="preItems"></textarea></div>
+      <div class="row" style="align-items:center"><button class="pri" id="preAdd" style="flex:0 0 auto">Adicionar pré-pedido</button><span class="mut" id="preMsg"></span></div>
+    </div>
+    <div class="card">
+      <div class="mut">Aguardando a mercadoria chegar (não depende do dia)</div>
+      <div class="big" id="preSummary"></div>
+      <div class="row" style="margin-top:10px;align-items:center">
+        <button id="preViewProd" style="flex:0 0 auto">Por produto (para comprar)</button>
+        <button id="preViewCli" style="flex:0 0 auto">Por cliente</button>
+        <button id="preOpenAll" style="flex:0 0 auto">▾ Abrir todos</button>
+        <button id="preCloseAll" style="flex:0 0 auto">▸ Recolher todos</button>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;margin:10px 0 0">Se chegar menos do que o total, cortar:
+        <select id="preAlloc" style="width:auto">
+          <option value="fifo">dos últimos pré-pedidos (ordem de chegada)</option>
+          <option value="prop">proporcional entre os clientes</option>
+        </select></label>
+      <div class="mut" style="margin-top:6px"><b>Quando a mercadoria chegar:</b> em “Por produto”, copie a compra para o fornecedor; ao receber, digite em “Chegou” a quantidade que veio de cada sabor e clique em <b>📦 Chegou → enviar para vendas</b>. O pedido de cada cliente vai para a aba 4 já com a quantidade certa, e o que faltar continua aqui.</div>
+    </div>
+    <div id="preList"></div>
+  </section>
+
   <div class="card">
     <details id="supBox">
       <summary>Fornecedores e marca própria</summary>
@@ -204,11 +235,12 @@
 
 <script>
 const KEY = 'pedidos-v1';
+let pre = []; try { pre = JSON.parse(localStorage.getItem('prepedidos-v1')) || []; } catch {}
 let lines = load();               // cada linha: {id,date,client,supplier,product,model,flavor,price,qty,own,bought}
 const $ = id => document.getElementById(id);
 
 function load() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } }
-function save() { localStorage.setItem(KEY, JSON.stringify(lines)); }
+function save() { localStorage.setItem(KEY, JSON.stringify(lines)); try { localStorage.setItem('prepedidos-v1', JSON.stringify(pre)); } catch {} }
 const iso = d => new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10);
 const norm = s => s.trim().replace(/\s+/g,' ');
 const key = s => norm(s).toLowerCase();
@@ -376,6 +408,7 @@ function render() {
   renderShort(ls);
   renderList();
   renderSales();
+  renderPre();
   $('clients').replaceChildren(...[...new Set(lines.map(l => l.client))].map(v => el('option', { value: v })));
   $('suppliers').replaceChildren(...[...new Set(rules.map(r => r.sup))].map(v => el('option', { value: v })));
 }
@@ -520,8 +553,8 @@ function renderBuy(ls) {
 }
 
 // Texto para o fornecedor: agrupado por modelo, sem preços
-function supplierText(sup, rows) {
-  const [d, m] = day().split('-').reverse();
+function supplierText(sup, rows, dt = day()) {
+  const [d, m] = dt.split('-').reverse();
   const out = [`Pedido ${d}/${m}${sup.startsWith('Sem ') ? '' : ' - ' + sup}`];
   byModel(rows).forEach(([model, items]) => {
     out.push('');
@@ -884,9 +917,136 @@ async function addClientPrice() {
   setClientPrice(c, item, pr);
 }
 
+// ---- Pré-pedidos: reservas de modelos que ainda vão chegar (sem data; ficam até a mercadoria chegar)
+const PA_KEY = 'preavail-v1', PO_KEY = 'preabertos-v1';
+let preAvail = {}, preOpen = new Set(), preView = 'prod';
+try { preAvail = JSON.parse(localStorage.getItem(PA_KEY)) || {}; } catch {}
+try { preOpen = new Set(JSON.parse(localStorage.getItem(PO_KEY)) || []); } catch {}
+const savePA = () => { try { localStorage.setItem(PA_KEY, JSON.stringify(preAvail)); } catch {} };
+const savePO = () => { try { localStorage.setItem(PO_KEY, JSON.stringify([...preOpen])); } catch {} };
+const preSup = l => isOwn(l) ? 'Marca própria (estoque)' : (supplierOf(l) || 'Sem fornecedor definido');
+const preAv = p => preAvail[key(p.product)];
+function preProducts() {                         // fornecedor -> produto -> {qty total, linhas dos clientes}
+  const g = {};
+  pre.forEach(l => { const m = (g[preSup(l)] ||= {});
+    const p = (m[key(l.product)] ||= { product: l.product, model: l.model || '', flavor: l.flavor || '', qty: 0, who: {}, lines: [] });
+    p.qty += l.qty; p.lines.push(l); p.who[l.client] = (p.who[l.client] || 0) + l.qty; });
+  return g;
+}
+function preAllocAll() {
+  const m = new Map();
+  Object.values(preProducts()).forEach(g => Object.values(g).forEach(p => allocate(p, preAv(p)).forEach((v, id) => m.set(id, v))));
+  return m;
+}
+const preMsg = t => { $('preMsg').textContent = t; };
+function addPre() {
+  const parsed = parseChat($('preItems').value, norm($('preClient').value));
+  if (!parsed.length) return preMsg('Cole os itens do pré-pedido.');
+  if (parsed.some(p => !p.client)) return preMsg('Informe o cliente (ou cole a conversa com o nome dele).');
+  parsed.forEach(p => { pre.push({ id: uid(), client: p.client, supplier: '', product: p.product, model: p.model, flavor: p.flavor, qty: p.qty,
+    price: p.price ?? clientPrice(p.client, p.model || p.product) });
+    if (p.price != null) rememberPrice(p.client, p.model || p.product, p.price); });
+  save();
+  const nomes = [...new Set(parsed.map(p => p.client))].join(', ');
+  $('preItems').value = ''; $('preClient').value = '';
+  preMsg(`✔ ${parsed.length} item(ns) de ${nomes} anotados.`);
+  render();
+}
+async function editPreQty(l) {
+  const v = parseInt(await askText(`Nova quantidade para "${l.product}" (${l.client}):`, l.qty), 10);
+  if (v > 0) { l.qty = v; delete l.manualGot; save(); render(); }
+}
+async function removePre(l) {
+  if (!await askConfirm(`Remover ${l.qty}x ${l.product} do pré-pedido de ${l.client}?`, 'Remover')) return;
+  pre = pre.filter(x => x.id !== l.id); save(); render();
+}
+async function editPrePrice(l) {
+  const item = l.model || l.product;
+  const pr = money(await askText(`Preço de ${item} para ${l.client} (vale para o modelo todo deste cliente nos pré-pedidos):`, l.price != null ? String(l.price).replace('.', ',') : ''));
+  if (pr == null) return;
+  pre.forEach(x => { if (x.client === l.client && key(x.model || x.product) === key(item)) x.price = pr; });
+  rememberPrice(l.client, item, pr); save(); render();
+}
+function setAvailPre(p, raw) {
+  const k = key(p.product), v = raw === '' ? null : Math.max(0, parseInt(raw, 10) || 0);
+  if (v == null) delete preAvail[k]; else preAvail[k] = v;
+  p.lines.forEach(l => delete l.manualGot); savePA(); save(); render();
+}
+const preText = (sup, rows) => supplierText(sup, rows, iso(new Date()));
+async function arrive(model, ps) {                // mercadoria chegou: vira pedido de venda já comprado, com a quantidade que veio
+  const items = ps.flatMap(p => { const got = allocate(p, preAv(p)); return p.lines.map(l => ({ l, g: got.get(l.id) ?? l.qty })); });
+  const units = items.reduce((a, x) => a + x.g, 0), clients = new Set(items.filter(x => x.g > 0).map(x => x.l.client)).size;
+  if (!units) return dialog('Nenhuma peça para enviar: preencha em “Chegou” a quantidade que veio.', { single: true });
+  if (!await askConfirm(`Enviar ${units} peças de ${model || 'estes itens'} para ${clients} cliente(s) na aba Pedidos a vender?\nO que faltar continua nos pré-pedidos.`, 'Enviar para vendas')) return;
+  const today = iso(new Date());
+  items.forEach(({ l, g }) => {
+    if (g <= 0) return;
+    lines.push({ id: uid(), date: today, client: l.client, supplier: l.supplier || '', product: l.product, model: l.model, flavor: l.flavor, price: l.price, qty: g, own: false, bought: true, got: g, sold: false });
+    if (l.qty - g > 0) { l.qty -= g; delete l.manualGot; } else pre = pre.filter(x => x.id !== l.id);
+  });
+  ps.forEach(p => { delete preAvail[key(p.product)]; }); savePA(); save(); render();
+  preMsg(`✔ ${units} peças enviadas para a aba 4. Pedidos a vender.`);
+}
+function renderPre() {
+  $('alloc').value = $('preAlloc').value = mode;
+  $('preViewProd').className = preView === 'prod' ? 'on' : ''; $('preViewCli').className = preView === 'cli' ? 'on' : '';
+  const g = preProducts(), prods = Object.values(g).flatMap(m => Object.values(m));
+  $('preSummary').textContent = pre.length ? `${new Set(pre.map(l => l.client)).size} cliente(s) · ${pre.reduce((a, l) => a + l.qty, 0)} peças · ${prods.length} produto(s)` : 'Nenhum pré-pedido';
+  const box = $('preList');
+  if (!pre.length) return box.replaceChildren(el('div', { className: 'card empty', textContent: 'Anote aqui os pré-pedidos dos clientes enquanto a mercadoria não chega.' }));
+  if (preView === 'prod') box.replaceChildren(...Object.keys(g).sort().map(sup => {
+    const rows = sortedRows(g[sup]), isOwnSup = sup.startsWith('Marca própria');
+    return el('div', { className: 'card' },
+      el('div', { className: 'row', style: 'align-items:center;margin-bottom:6px' },
+        el('h2', { style: 'margin:0', textContent: `${sup} — ${rows.reduce((a, p) => a + p.qty, 0)} un.` }),
+        isOwnSup ? '' : el('button', { className: 'pri', style: 'flex:0 0 auto', textContent: '📋 Copiar compra', onclick: e => copyText(preText(sup, rows), e.target, '📋 Copiar compra') })),
+      ...byModel(rows).map(([model, items]) => {
+        const k = sup + '|' + model, open = preOpen.has(k), clients = new Set(items.flatMap(p => p.lines.map(l => l.client))).size;
+        const head = el('div', { className: 'row', style: 'align-items:center;cursor:pointer;user-select:none;padding:6px 0;border-top:1px solid var(--line)',
+            onclick: () => { if (open) preOpen.delete(k); else preOpen.add(k); savePO(); renderPre(); } },
+          el('b', { style: 'flex:1 1 220px', textContent: `${open ? '▾' : '▸'} ${model || 'Sem modelo'}` }),
+          el('span', { className: 'mut', style: 'flex:0 0 auto', textContent: `${items.reduce((a, p) => a + p.qty, 0)} un. · ${clients} cliente(s)` }),
+          el('button', { style: 'flex:0 0 auto', textContent: '📦 Chegou → enviar para vendas', onclick: e => { e.stopPropagation(); arrive(model, items); } }),
+          el('button', { style: 'flex:0 0 auto', textContent: '📋', title: 'Copiar só este modelo', onclick: e => { e.stopPropagation(); copyText(preText(sup, items), e.target, '📋'); } }));
+        if (!open) return head;
+        return el('div', {}, head, el('table', {},
+          el('tr', {}, el('th', { className: 'n', textContent: 'Qtd' }), el('th', { textContent: 'Sabor' }), el('th', { textContent: 'Chegou' }), el('th', { textContent: 'Clientes' })),
+          ...items.map(p => { const got = allocate(p, preAv(p));
+            return el('tr', {},
+              el('td', { className: 'n', textContent: p.qty }),
+              el('td', { textContent: model ? p.flavor : p.product }),
+              el('td', {}, el('input', { type: 'number', min: 0, style: 'width:78px', placeholder: String(p.qty), value: preAv(p) ?? '', title: 'Quantas peças chegaram', onchange: e => setAvailPre(p, e.target.value) })),
+              el('td', {}, ...p.lines.map(l => { const gg = got.get(l.id);
+                return el('button', { className: 'x', style: gg < l.qty ? 'color:var(--warn)' : '', title: 'Ajustar quanto este cliente recebe',
+                  textContent: gg < l.qty ? `${l.client} ${l.qty}→${gg}` : `${l.client} (${l.qty})`, onclick: () => adjustLine(l, gg) }); }))); })));
+      }));
+  }));
+  else {
+    const gm = preAllocAll(), byC = {};
+    pre.forEach(l => (byC[l.client] ||= []).push(l));
+    box.replaceChildren(...Object.keys(byC).sort().map(c => {
+      const ls = byC[c], k = 'c|' + c, open = preOpen.has(k), tot = ls.reduce((a, l) => a + l.qty * (l.price ?? 0), 0), miss = ls.filter(l => l.price == null).length;
+      const head = el('div', { className: 'row', style: 'align-items:center;cursor:pointer;user-select:none', onclick: () => { if (open) preOpen.delete(k); else preOpen.add(k); savePO(); renderPre(); } },
+        el('h2', { style: 'margin:0;flex:1 1 220px' }, `${open ? '▾' : '▸'} ${c} `, miss ? el('span', { className: 'tag warn', textContent: `${miss} sem preço` }) : ''),
+        el('span', { className: 'mut', style: 'flex:0 0 auto', textContent: `${ls.reduce((a, l) => a + l.qty, 0)} peças · ${brl(tot)}` }));
+      if (!open) return el('div', { className: 'card', style: 'padding:10px 14px' }, head);
+      return el('div', { className: 'card' }, head, el('table', { style: 'margin-top:8px' },
+        el('tr', {}, el('th', { className: 'n', textContent: 'Qtd' }), el('th', { textContent: 'Produto' }), el('th', { className: 'n', textContent: 'Preço' }), el('th', { className: 'n', textContent: 'Subtotal' }), el('th', {})),
+        ...ls.map(l => { const gg = gm.get(l.id) ?? l.qty;
+          return el('tr', {},
+            el('td', { className: 'n', style: 'font-weight:700', textContent: l.qty }),
+            el('td', {}, l.product + ' ', gg < l.qty ? el('span', { className: 'tag warn', textContent: `⚠ vai receber ${gg}` }) : ''),
+            el('td', { className: 'n' }, el('button', { className: l.price == null ? 'pri' : 'x', textContent: l.price != null ? brl(l.price) : '＋ preço', onclick: () => editPrePrice(l) })),
+            el('td', { className: 'n', textContent: l.price != null ? brl(l.qty * l.price) : '—' }),
+            el('td', { className: 'n' }, el('button', { className: 'x', textContent: '✎', title: 'Editar quantidade', onclick: () => editPreQty(l) }),
+              el('button', { className: 'x', textContent: '✕', title: 'Remover', onclick: () => removePre(l) }))); })));
+    }));
+  }
+}
+
 // ---- navegação
 function tab(which) {
-  ['orders', 'buy', 'list', 'sales'].forEach(t => {
+  ['orders', 'buy', 'list', 'sales', 'pre'].forEach(t => {
     $('view-' + t).classList.toggle('hide', which !== t);
     $('tab-' + t).classList.toggle('on', which === t);
   });
@@ -897,6 +1057,13 @@ $('tab-orders').onclick = () => tab('orders');
 $('tab-buy').onclick = () => tab('buy');
 $('tab-list').onclick = () => tab('list');
 $('tab-sales').onclick = () => tab('sales');
+$('tab-pre').onclick = () => tab('pre');
+$('preAdd').onclick = addPre;
+$('preViewProd').onclick = () => { preView = 'prod'; renderPre(); };
+$('preViewCli').onclick = () => { preView = 'cli'; renderPre(); };
+$('preAlloc').onchange = e => { mode = e.target.value; try { localStorage.setItem(MODE_KEY, mode); } catch {} render(); };
+$('preOpenAll').onclick = () => { if (preView === 'cli') pre.forEach(l => preOpen.add('c|' + l.client)); else Object.entries(preProducts()).forEach(([sup, m]) => byModel(Object.values(m)).forEach(([model]) => preOpen.add(sup + '|' + model))); savePO(); renderPre(); };
+$('preCloseAll').onclick = () => { preOpen.clear(); savePO(); renderPre(); };
 $('salesPrintAll').onclick = () => printGroups(salesGroups());
 $('salesDlAll').onclick = () => downloadSep(salesGroups());
 $('salesCsv').onclick = () => download(`vendas-a-lancar-${iso(new Date())}.csv`, launchCsv(salesGroups()), 'text/csv');
@@ -933,14 +1100,14 @@ $('date').onchange = render;
 $('prev').onclick = () => shift(-1);
 $('next').onclick = () => shift(1);
 $('today').onclick = () => { $('date').value = iso(new Date()); render(); };
-$('exp').onclick = () => download(`backup-pedidos-${iso(new Date())}.json`, JSON.stringify({ v: 3, lines, listas, cprices, stages }), 'application/json');
+$('exp').onclick = () => download(`backup-pedidos-${iso(new Date())}.json`, JSON.stringify({ v: 4, lines, listas, cprices, stages, pre, preAvail }), 'application/json');
 $('imp').onclick = () => $('file').click();
 $('file').onchange = async e => {
   try {
     const data = JSON.parse(await e.target.files[0].text());
     const ls = Array.isArray(data) ? data : data.lines;
     if (!Array.isArray(ls)) throw 0;
-    if (await askConfirm('Isso substitui todos os dados atuais. Continuar?', 'Restaurar')) { lines = ls; if (data.listas) { listas = data.listas; saveListas(); } if (data.cprices) { cprices = data.cprices; saveCP(); } if (data.stages) { stages = data.stages; saveST(); } save(); render(); }
+    if (await askConfirm('Isso substitui todos os dados atuais. Continuar?', 'Restaurar')) { lines = ls; if (data.listas) { listas = data.listas; saveListas(); } if (data.cprices) { cprices = data.cprices; saveCP(); } if (data.stages) { stages = data.stages; saveST(); } if (data.pre) { pre = data.pre; } if (data.preAvail) { preAvail = data.preAvail; savePA(); } save(); render(); }
   } catch { await dialog('Arquivo de backup inválido.', { single: true }); }
   e.target.value = '';
 };
